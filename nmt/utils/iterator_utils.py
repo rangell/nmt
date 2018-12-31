@@ -19,10 +19,13 @@ import collections
 
 import tensorflow as tf
 
+from IPython import embed
+
 from ..utils import vocab_utils
 
 
-__all__ = ["BatchedInput", "get_iterator", "get_infer_iterator"]
+__all__ = ["BatchedInput", "get_iterator", "get_infer_iterator",
+           "get_style_iterator"]
 
 
 # NOTE(ebrevdo): When we subclass this, instances' __dict__ becomes empty.
@@ -93,6 +96,65 @@ def get_infer_iterator(src_dataset,
       target_output=None,
       source_sequence_length=src_seq_len,
       target_sequence_length=None)
+
+
+def get_style_iterator(src_dataset,
+                 tgt_dataset,
+                 src_vocab_table,
+                 tgt_vocab_table,
+                 batch_size,
+                 sos,
+                 eos,
+                 random_seed,
+                 num_buckets,
+                 src_max_len=None,
+                 tgt_max_len=None,
+                 num_parallel_calls=4,
+                 output_buffer_size=None,
+                 skip_count=None,
+                 num_shards=1,
+                 shard_index=0,
+                 reshuffle_each_iteration=True,
+                 use_char_encode=False):
+  assert use_char_encode == False
+
+  if not output_buffer_size:
+    output_buffer_size = batch_size * 1000
+
+  sos_id = tf.cast(src_vocab_table.lookup(tf.constant(sos)), tf.int32)
+  eos_id = tf.cast(src_vocab_table.lookup(tf.constant(eos)), tf.int32)
+
+  label0 = tf.data.Dataset.from_tensors(0).repeat()
+  label1 = tf.data.Dataset.from_tensors(1).repeat()
+
+  src_plus_label = tf.data.Dataset.zip((src_dataset, label0))
+  tgt_plus_label = tf.data.Dataset.zip((tgt_dataset, label1))
+
+  joint_dataset = tf.data.experimental.sample_from_datasets([src_plus_label,
+                                                             tgt_plus_label])
+
+  joint_dataset = joint_dataset.shard(num_shards, shard_index)
+
+  if skip_count is not None:
+    joint_dataset = joint_dataset.skip(skip_count)
+
+  joint_dataset = joint_dataset.shuffle(
+      output_buffer_size, random_seed, reshuffle_each_iteration)
+  
+  joint_dataset = joint_dataset.map(
+      lambda sent, label: (
+          tf.string_split([sent]).values, label),
+      num_parallel_calls=num_parallel_calls).prefetch(output_buffer_size)
+
+  # Filter zero length input sequences.
+  joint_dataset = joint_dataset.filter(lambda sent, _: tf.size(sent) > 0)
+
+  # NOTE(rangell): we ignore `src_max_len` and `tgt_max_len`.
+  #                might address later 
+
+  joint_dataset = joint_dataset.map(
+      lambda sent, l: (tf.cast(src_vocab_table.lookup(sent), tf.int32, l)))
+
 
 
 def get_iterator(src_dataset,
