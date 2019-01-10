@@ -758,7 +758,7 @@ class Model(BaseModel):
                                        self.num_units])
       encoder_initial_state = tf.nn.rnn_cell.LSTMStateTuple(style_emb_inp,
                                                             content_emb_inp)
-      
+
       # Look up embeddings for each token in sequence
       self.encoder_emb_inp = self.encoder_emb_lookup_fn(
           self.embedding, sequence)

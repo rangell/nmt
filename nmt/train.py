@@ -507,10 +507,11 @@ def train(hparams, scope=None, target_session=""):
       train_model.iterator.initializer,
       feed_dict={train_model.skip_count_placeholder: 0})
 
-  print(train_sess.run(train_model.model.tmp_encoder_state,
-      feed_dict={train_model.model.decode_transfer: True}))
+  #print(train_sess.run(train_model.model.tmp_encoder_state,
+  #    feed_dict={train_model.model.decode_transfer: True}))
 
-  #print(train_model.model.decode_transfer)
+  #print(type(train_sess.run(train_model.model.tmp_style_labels,
+  #    feed_dict={train_model.model.decode_transfer: False})))
 
   print("Just before first evaluation!")
   exit()

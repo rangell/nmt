@@ -19,6 +19,7 @@ from __future__ import print_function
 
 import tensorflow as tf
 
+from . import attention_mechanisms
 from . import model
 from . import model_helper
 
@@ -151,31 +152,42 @@ class AttentionModel(model.Model):
 
 
 def create_attention_mechanism(attention_option, num_units, memory,
-                               source_sequence_length, mode):
+                               source_sequence_length, mode, reuse=False):
   """Create attention mechanism based on the attention_option."""
   del mode  # unused
 
   # Mechanism
   if attention_option == "luong":
-    attention_mechanism = tf.contrib.seq2seq.LuongAttention(
-        num_units, memory, memory_sequence_length=source_sequence_length)
+    attention_mechanism = attention_mechanisms.ReusableLuongAttention(
+        num_units,
+        memory,
+        memory_sequence_length=source_sequence_length,
+        reuse=reuse)
   elif attention_option == "scaled_luong":
-    attention_mechanism = tf.contrib.seq2seq.LuongAttention(
+    attention_mechanism = attention_mechanisms.ReusableLuongAttention(
         num_units,
         memory,
         memory_sequence_length=source_sequence_length,
-        scale=True)
+        scale=True,
+        reuse=reuse)
   elif attention_option == "bahdanau":
-    attention_mechanism = tf.contrib.seq2seq.BahdanauAttention(
-        num_units, memory, memory_sequence_length=source_sequence_length)
-  elif attention_option == "normed_bahdanau":
-    attention_mechanism = tf.contrib.seq2seq.BahdanauAttention(
+    attention_mechanism = attention_mechanisms.ReusableBahdanauAttention(
         num_units,
         memory,
         memory_sequence_length=source_sequence_length,
-        normalize=True)
+        reuse=reuse)
+  elif attention_option == "normed_bahdanau":
+    attention_mechanism = attention_mechanisms.ReusableBahdanauAttention(
+        num_units,
+        memory,
+        memory_sequence_length=source_sequence_length,
+        normalize=True,
+        reuse=reuse)
   else:
     raise ValueError("Unknown attention option %s" % attention_option)
+
+  print("Created {} attention mechanism!!!".format(attention_option))
+  exit()
 
   return attention_mechanism
 
