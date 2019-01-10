@@ -22,6 +22,8 @@ import time
 
 import tensorflow as tf
 
+from IPython import embed
+
 from . import attention_model
 from . import gnmt_model
 from . import inference
@@ -467,10 +469,10 @@ def train(hparams, scope=None, target_session=""):
   infer_model = model_helper.create_infer_model(model_creator, hparams, scope)
 
   # Preload data for sample decoding.
-  dev_src_file = "%s.%s" % (hparams.dev_prefix, hparams.src)
-  dev_tgt_file = "%s.%s" % (hparams.dev_prefix, hparams.tgt)
-  sample_src_data = inference.load_data(dev_src_file)
-  sample_tgt_data = inference.load_data(dev_tgt_file)
+  dev_style_A_file = "%s.%s" % (hparams.dev_prefix, hparams.style_A)
+  dev_style_B_file = "%s.%s" % (hparams.dev_prefix, hparams.style_B)
+  sample_style_A_data = inference.load_data(dev_style_A_file)
+  sample_style_B_data = inference.load_data(dev_style_B_file)
 
   summary_name = "train_log"
   model_dir = hparams.out_dir
@@ -500,6 +502,19 @@ def train(hparams, scope=None, target_session=""):
   summary_writer = tf.summary.FileWriter(
       os.path.join(out_dir, summary_name), train_model.graph)
 
+  # Test style embedding input
+  train_sess.run(
+      train_model.iterator.initializer,
+      feed_dict={train_model.skip_count_placeholder: 0})
+
+  print(train_sess.run(train_model.model.tmp_encoder_state,
+      feed_dict={train_model.model.decode_transfer: True}))
+
+  #print(train_model.model.decode_transfer)
+
+  print("Just before first evaluation!")
+  exit()
+
   # First evaluation
   run_full_eval(
       model_dir, infer_model, infer_sess,
@@ -518,6 +533,21 @@ def train(hparams, scope=None, target_session=""):
     ### Run a step ###
     start_time = time.time()
     try:
+
+      source1, target1 = train_sess.run([train_model.iterator.source,
+                                       train_model.iterator.target_output])
+
+      train_sess.run(
+          train_model.iterator.initializer,
+          feed_dict={train_model.skip_count_placeholder: 0})
+
+      source2, target2 = train_sess.run([train_model.iterator.source,
+                                       train_model.iterator.target_output])
+
+      embed()
+      exit()
+
+
       step_result = loaded_train_model.train(train_sess)
       hparams.epoch_step += 1
     except tf.errors.OutOfRangeError:
@@ -526,6 +556,7 @@ def train(hparams, scope=None, target_session=""):
       utils.print_out(
           "# Finished an epoch, step %d. Perform external evaluation" %
           global_step)
+      exit()
       run_sample_decode(infer_model, infer_sess, model_dir, hparams,
                         summary_writer, sample_src_data, sample_tgt_data)
       run_external_eval(infer_model, infer_sess, model_dir, hparams,

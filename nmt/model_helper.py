@@ -23,6 +23,8 @@ import numpy as np
 import six
 import tensorflow as tf
 
+from IPython import embed
+
 from tensorflow.python.ops import lookup_ops
 from .utils import iterator_utils
 from .utils import misc_utils as utils
@@ -80,33 +82,29 @@ def create_train_model(
     model_creator, hparams, scope=None, num_workers=1, jobid=0,
     extra_args=None):
   """Create train graph, model, and iterator."""
-  src_file = "%s.%s" % (hparams.train_prefix, hparams.src)
-  tgt_file = "%s.%s" % (hparams.train_prefix, hparams.tgt)
-  src_vocab_file = hparams.src_vocab_file
-  tgt_vocab_file = hparams.tgt_vocab_file
+  style_A_file = "%s.%s" % (hparams.train_prefix, hparams.style_A)
+  style_B_file = "%s.%s" % (hparams.train_prefix, hparams.style_B)
+  vocab_file = hparams.vocab_file
 
   graph = tf.Graph()
 
   with graph.as_default(), tf.container(scope or "train"):
-    src_vocab_table, tgt_vocab_table = vocab_utils.create_vocab_tables(
-        src_vocab_file, tgt_vocab_file, hparams.share_vocab)
+    vocab_table = vocab_utils.create_vocab_table(vocab_file)
 
-    src_dataset = tf.data.TextLineDataset(tf.gfile.Glob(src_file))
-    tgt_dataset = tf.data.TextLineDataset(tf.gfile.Glob(tgt_file))
+    style_A_dataset = tf.data.TextLineDataset(tf.gfile.Glob(style_A_file))
+    style_B_dataset = tf.data.TextLineDataset(tf.gfile.Glob(style_B_file))
     skip_count_placeholder = tf.placeholder(shape=(), dtype=tf.int64)
 
-    iterator = iterator_utils.get_iterator(
-        src_dataset,
-        tgt_dataset,
-        src_vocab_table,
-        tgt_vocab_table,
+    iterator = iterator_utils.get_style_iterator(
+        style_A_dataset,
+        style_B_dataset,
+        vocab_table,
         batch_size=hparams.batch_size,
         sos=hparams.sos,
         eos=hparams.eos,
         random_seed=hparams.random_seed,
         num_buckets=hparams.num_buckets,
-        src_max_len=hparams.src_max_len,
-        tgt_max_len=hparams.tgt_max_len,
+        max_len=hparams.max_len,
         skip_count=skip_count_placeholder,
         num_shards=num_workers,
         shard_index=jobid,
@@ -121,8 +119,7 @@ def create_train_model(
           hparams,
           iterator=iterator,
           mode=tf.contrib.learn.ModeKeys.TRAIN,
-          source_vocab_table=src_vocab_table,
-          target_vocab_table=tgt_vocab_table,
+          vocab_table=vocab_table,
           scope=scope,
           extra_args=extra_args)
 
@@ -135,101 +132,108 @@ def create_train_model(
 
 class EvalModel(
     collections.namedtuple("EvalModel",
-                           ("graph", "model", "src_file_placeholder",
-                            "tgt_file_placeholder", "iterator"))):
+                           ("graph", "model", "style_A_file_placeholder",
+                            "style_B_file_placeholder", "iterator"))):
   pass
 
 
 def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
   """Create train graph, model, src/tgt file holders, and iterator."""
-  src_vocab_file = hparams.src_vocab_file
-  tgt_vocab_file = hparams.tgt_vocab_file
+  vocab_file = hparams.vocab_file
   graph = tf.Graph()
 
   with graph.as_default(), tf.container(scope or "eval"):
-    src_vocab_table, tgt_vocab_table = vocab_utils.create_vocab_tables(
-        src_vocab_file, tgt_vocab_file, hparams.share_vocab)
-    reverse_tgt_vocab_table = lookup_ops.index_to_string_table_from_file(
-        tgt_vocab_file, default_value=vocab_utils.UNK)
+    vocab_table = vocab_utils.create_vocab_table(vocab_file)
+    reverse_vocab_table = lookup_ops.index_to_string_table_from_file(
+        vocab_file, default_value=vocab_utils.UNK)
 
-    src_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
-    tgt_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
-    src_dataset = tf.data.TextLineDataset(src_file_placeholder)
-    tgt_dataset = tf.data.TextLineDataset(tgt_file_placeholder)
-    iterator = iterator_utils.get_iterator(
-        src_dataset,
-        tgt_dataset,
-        src_vocab_table,
-        tgt_vocab_table,
-        hparams.batch_size,
+    style_A_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
+    style_B_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
+
+    style_A_dataset = tf.data.TextLineDataset(style_A_file_placeholder)
+    style_B_dataset = tf.data.TextLineDataset(style_B_file_placeholder)
+
+    iterator = iterator_utils.get_style_iterator(
+        style_A_dataset,
+        style_B_dataset,
+        vocab_table,
+        batch_size=hparams.batch_size,
         sos=hparams.sos,
         eos=hparams.eos,
         random_seed=hparams.random_seed,
         num_buckets=hparams.num_buckets,
-        src_max_len=hparams.src_max_len_infer,
-        tgt_max_len=hparams.tgt_max_len_infer,
+        max_len=hparams.max_len,
         use_char_encode=hparams.use_char_encode)
+
     model = model_creator(
         hparams,
         iterator=iterator,
         mode=tf.contrib.learn.ModeKeys.EVAL,
-        source_vocab_table=src_vocab_table,
-        target_vocab_table=tgt_vocab_table,
-        reverse_target_vocab_table=reverse_tgt_vocab_table,
+        vocab_table=vocab_table,
+        reverse_vocab_table=reverse_vocab_table,
         scope=scope,
         extra_args=extra_args)
+
   return EvalModel(
       graph=graph,
       model=model,
-      src_file_placeholder=src_file_placeholder,
-      tgt_file_placeholder=tgt_file_placeholder,
+      style_A_file_placeholder=style_A_file_placeholder,
+      style_B_file_placeholder=style_B_file_placeholder,
       iterator=iterator)
 
 
 class InferModel(
     collections.namedtuple("InferModel",
-                           ("graph", "model", "src_placeholder",
-                            "batch_size_placeholder", "iterator"))):
+                           ("graph", "model", "style_A_placeholder",
+                            "style_B_placeholder", "batch_size_placeholder",
+                            "iterator"))):
   pass
 
 
 def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
   """Create inference model."""
+
   graph = tf.Graph()
-  src_vocab_file = hparams.src_vocab_file
-  tgt_vocab_file = hparams.tgt_vocab_file
+  vocab_file = hparams.vocab_file
 
   with graph.as_default(), tf.container(scope or "infer"):
-    src_vocab_table, tgt_vocab_table = vocab_utils.create_vocab_tables(
-        src_vocab_file, tgt_vocab_file, hparams.share_vocab)
-    reverse_tgt_vocab_table = lookup_ops.index_to_string_table_from_file(
-        tgt_vocab_file, default_value=vocab_utils.UNK)
+    vocab_table = vocab_utils.create_vocab_table(vocab_file)
+    reverse_vocab_table = lookup_ops.index_to_string_table_from_file(
+        vocab_file, default_value=vocab_utils.UNK)
 
-    src_placeholder = tf.placeholder(shape=[None], dtype=tf.string)
+    style_A_placeholder = tf.placeholder(shape=[None], dtype=tf.string)
+    style_B_placeholder = tf.placeholder(shape=[None], dtype=tf.string)
     batch_size_placeholder = tf.placeholder(shape=[], dtype=tf.int64)
 
-    src_dataset = tf.data.Dataset.from_tensor_slices(
-        src_placeholder)
-    iterator = iterator_utils.get_infer_iterator(
-        src_dataset,
-        src_vocab_table,
+    style_A_dataset = tf.data.Dataset.from_tensor_slices(
+        style_A_placeholder)
+    style_B_dataset = tf.data.Dataset.from_tensor_slices(
+        style_B_placeholder)
+
+    iterator = iterator_utils.get_style_infer_iterator(
+        style_A_dataset,
+        style_B_dataset,
+        vocab_table,
         batch_size=batch_size_placeholder,
         eos=hparams.eos,
-        src_max_len=hparams.src_max_len_infer,
+        max_len=hparams.max_len_infer,
         use_char_encode=hparams.use_char_encode)
+
+
     model = model_creator(
         hparams,
         iterator=iterator,
         mode=tf.contrib.learn.ModeKeys.INFER,
-        source_vocab_table=src_vocab_table,
-        target_vocab_table=tgt_vocab_table,
-        reverse_target_vocab_table=reverse_tgt_vocab_table,
+        vocab_table=vocab_table,
+        reverse_vocab_table=reverse_vocab_table,
         scope=scope,
         extra_args=extra_args)
+
   return InferModel(
       graph=graph,
       model=model,
-      src_placeholder=src_placeholder,
+      style_A_placeholder=style_A_placeholder,
+      style_B_placeholder=style_B_placeholder,
       batch_size_placeholder=batch_size_placeholder,
       iterator=iterator)
 
@@ -287,31 +291,20 @@ def _create_or_load_embed(embed_name, vocab_file, embed_file,
   return embedding
 
 
-def create_emb_for_encoder_and_decoder(share_vocab,
-                                       src_vocab_size,
-                                       tgt_vocab_size,
-                                       src_embed_size,
-                                       tgt_embed_size,
+def create_emb_for_encoder_and_decoder(vocab_size,
+                                       embed_size,
                                        dtype=tf.float32,
                                        num_enc_partitions=0,
                                        num_dec_partitions=0,
-                                       src_vocab_file=None,
-                                       tgt_vocab_file=None,
-                                       src_embed_file=None,
-                                       tgt_embed_file=None,
+                                       vocab_file=None,
+                                       embed_file=None,
                                        use_char_encode=False,
                                        scope=None):
   """Create embedding matrix for both encoder and decoder.
 
   Args:
-    share_vocab: A boolean. Whether to share embedding matrix for both
-      encoder and decoder.
-    src_vocab_size: An integer. The source vocab size.
-    tgt_vocab_size: An integer. The target vocab size.
-    src_embed_size: An integer. The embedding dimension for the encoder's
-      embedding.
-    tgt_embed_size: An integer. The embedding dimension for the decoder's
-      embedding.
+    vocab_size: An integer. The vocab size.
+    embed_size: An integer. The embedding dimension
     dtype: dtype of the embedding matrix. Default to float32.
     num_enc_partitions: number of partitions used for the encoder's embedding
       vars.
@@ -345,47 +338,15 @@ def create_emb_for_encoder_and_decoder(share_vocab,
     # jobs.
     dec_partitioner = tf.fixed_size_partitioner(num_dec_partitions)
 
-  if src_embed_file and enc_partitioner:
-    raise ValueError(
-        "Can't set num_enc_partitions > 1 when using pretrained encoder "
-        "embedding")
-
-  if tgt_embed_file and dec_partitioner:
-    raise ValueError(
-        "Can't set num_dec_partitions > 1 when using pretrained decdoer "
-        "embedding")
-
   with tf.variable_scope(
       scope or "embeddings", dtype=dtype, partitioner=enc_partitioner) as scope:
     # Share embedding
-    if share_vocab:
-      if src_vocab_size != tgt_vocab_size:
-        raise ValueError("Share embedding but different src/tgt vocab sizes"
-                         " %d vs. %d" % (src_vocab_size, tgt_vocab_size))
-      assert src_embed_size == tgt_embed_size
-      utils.print_out("# Use the same embedding for source and target")
-      vocab_file = src_vocab_file or tgt_vocab_file
-      embed_file = src_embed_file or tgt_embed_file
+    utils.print_out("# Use the same embedding for both styles")
+    embedding = _create_or_load_embed(
+        "embedding", vocab_file, embed_file,
+        vocab_size, embed_size, dtype)
 
-      embedding_encoder = _create_or_load_embed(
-          "embedding_share", vocab_file, embed_file,
-          src_vocab_size, src_embed_size, dtype)
-      embedding_decoder = embedding_encoder
-    else:
-      if not use_char_encode:
-        with tf.variable_scope("encoder", partitioner=enc_partitioner):
-          embedding_encoder = _create_or_load_embed(
-              "embedding_encoder", src_vocab_file, src_embed_file,
-              src_vocab_size, src_embed_size, dtype)
-      else:
-        embedding_encoder = None
-
-      with tf.variable_scope("decoder", partitioner=dec_partitioner):
-        embedding_decoder = _create_or_load_embed(
-            "embedding_decoder", tgt_vocab_file, tgt_embed_file,
-            tgt_vocab_size, tgt_embed_size, dtype)
-
-  return embedding_encoder, embedding_decoder
+  return embedding
 
 
 def _single_cell(unit_type, num_units, forget_bias, dropout, mode,

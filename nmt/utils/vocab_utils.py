@@ -151,6 +151,10 @@ def create_vocab_tables(src_vocab_file, tgt_vocab_file, share_vocab):
         tgt_vocab_file, default_value=UNK_ID)
   return src_vocab_table, tgt_vocab_table
 
+def create_vocab_table(vocab_file):
+  """Creates vocab table for vocab_file."""
+  return lookup_ops.index_table_from_file(vocab_file, default_value=UNK_ID)
+
 
 def load_embed_txt(embed_file):
   """Load embed_file into a python dictionary.

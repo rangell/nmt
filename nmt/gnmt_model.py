@@ -36,9 +36,8 @@ class GNMTModel(attention_model.AttentionModel):
                hparams,
                mode,
                iterator,
-               source_vocab_table,
-               target_vocab_table,
-               reverse_target_vocab_table=None,
+               vocab_table,
+               reverse_vocab_table=None,
                scope=None,
                extra_args=None):
     self.is_gnmt_attention = (
@@ -48,9 +47,8 @@ class GNMTModel(attention_model.AttentionModel):
         hparams=hparams,
         mode=mode,
         iterator=iterator,
-        source_vocab_table=source_vocab_table,
-        target_vocab_table=target_vocab_table,
-        reverse_target_vocab_table=reverse_target_vocab_table,
+        vocab_table=vocab_table,
+        reverse_vocab_table=reverse_vocab_table,
         scope=scope,
         extra_args=extra_args)
 

@@ -22,6 +22,7 @@ import abc
 import collections
 import numpy as np
 
+from IPython import embed
 import tensorflow as tf
 
 from . import model_helper
@@ -32,6 +33,9 @@ from .utils import vocab_utils
 utils.check_tensorflow_version()
 
 __all__ = ["BaseModel", "Model"]
+
+
+NUM_STYLES = 2
 
 
 class TrainOutputTuple(collections.namedtuple(
@@ -63,9 +67,8 @@ class BaseModel(object):
                hparams,
                mode,
                iterator,
-               source_vocab_table,
-               target_vocab_table,
-               reverse_target_vocab_table=None,
+               vocab_table,
+               reverse_vocab_table=None,
                scope=None,
                extra_args=None):
     """Create the model.
@@ -76,15 +79,14 @@ class BaseModel(object):
       iterator: Dataset Iterator that feeds data.
       source_vocab_table: Lookup table mapping source words to ids.
       target_vocab_table: Lookup table mapping target words to ids.
-      reverse_target_vocab_table: Lookup table mapping ids to target words. Only
+      reverse_vocab_table: Lookup table mapping ids to words. Only
         required in INFER mode. Defaults to None.
       scope: scope of the model.
       extra_args: model_helper.ExtraArgs, for passing customizable functions.
 
     """
     # Set params
-    self._set_params_initializer(hparams, mode, iterator,
-                                 source_vocab_table, target_vocab_table,
+    self._set_params_initializer(hparams, mode, iterator, vocab_table, 
                                  scope, extra_args)
 
     # Not used in general seq2seq models; when True, ignore decoder & training
@@ -94,7 +96,7 @@ class BaseModel(object):
     # Train graph
     res = self.build_graph(hparams, scope=scope)
     if not self.extract_encoder_layers:
-      self._set_train_or_infer(res, reverse_target_vocab_table, hparams)
+      self._set_train_or_infer(res, reverse_vocab_table, hparams)
 
     # Saver
     self.saver = tf.train.Saver(
@@ -104,19 +106,16 @@ class BaseModel(object):
                               hparams,
                               mode,
                               iterator,
-                              source_vocab_table,
-                              target_vocab_table,
+                              vocab_table,
                               scope,
                               extra_args=None):
     """Set various params for self and initialize."""
-    assert isinstance(iterator, iterator_utils.BatchedInput)
+    assert isinstance(iterator, iterator_utils.StyleBatchedInput)
     self.iterator = iterator
     self.mode = mode
-    self.src_vocab_table = source_vocab_table
-    self.tgt_vocab_table = target_vocab_table
+    self.vocab_table = vocab_table
 
-    self.src_vocab_size = hparams.src_vocab_size
-    self.tgt_vocab_size = hparams.tgt_vocab_size
+    self.vocab_size = hparams.vocab_size
     self.num_gpus = hparams.num_gpus
     self.time_major = hparams.time_major
 
@@ -168,7 +167,7 @@ class BaseModel(object):
       self.encoder_emb_lookup_fn = tf.nn.embedding_lookup
     self.init_embeddings(hparams, scope)
 
-  def _set_train_or_infer(self, res, reverse_target_vocab_table, hparams):
+  def _set_train_or_infer(self, res, reverse_vocab_table, hparams):
     """Set up training and inference."""
     if self.mode == tf.contrib.learn.ModeKeys.TRAIN:
       self.train_loss = res[1]
@@ -179,7 +178,7 @@ class BaseModel(object):
       self.eval_loss = res[1]
     elif self.mode == tf.contrib.learn.ModeKeys.INFER:
       self.infer_logits, _, self.final_context_state, self.sample_id = res
-      self.sample_words = reverse_target_vocab_table.lookup(
+      self.sample_words = reverse_vocab_table.lookup(
           tf.to_int64(self.sample_id))
 
     if self.mode != tf.contrib.learn.ModeKeys.INFER:
@@ -300,21 +299,15 @@ class BaseModel(object):
 
   def init_embeddings(self, hparams, scope):
     """Init embeddings."""
-    self.embedding_encoder, self.embedding_decoder = (
-        model_helper.create_emb_for_encoder_and_decoder(
-            share_vocab=hparams.share_vocab,
-            src_vocab_size=self.src_vocab_size,
-            tgt_vocab_size=self.tgt_vocab_size,
-            src_embed_size=self.num_units,
-            tgt_embed_size=self.num_units,
+    self.embedding = model_helper.create_emb_for_encoder_and_decoder(
+            vocab_size=self.vocab_size,
+            embed_size=self.num_units,
             num_enc_partitions=hparams.num_enc_emb_partitions,
             num_dec_partitions=hparams.num_dec_emb_partitions,
-            src_vocab_file=hparams.src_vocab_file,
-            tgt_vocab_file=hparams.tgt_vocab_file,
-            src_embed_file=hparams.src_embed_file,
-            tgt_embed_file=hparams.tgt_embed_file,
+            vocab_file=hparams.vocab_file,
+            embed_file=hparams.embed_file,
             use_char_encode=hparams.use_char_encode,
-            scope=scope,))
+            scope=scope,)
 
   def _get_train_summary(self):
     """Get train summary."""
@@ -368,12 +361,21 @@ class BaseModel(object):
     """
     utils.print_out("# Creating %s graph ..." % self.mode)
 
+    # predicate determining if we want to auto-encode(False)
+    # or style-transfer(True)
+    self.decode_transfer = tf.placeholder(tf.bool, name="decode_transfer")
+
     # Projection
     if not self.extract_encoder_layers:
       with tf.variable_scope(scope or "build_network"):
         with tf.variable_scope("decoder/output_projection"):
           self.output_layer = tf.layers.Dense(
-              self.tgt_vocab_size, use_bias=False, name="output_projection")
+              self.vocab_size, use_bias=False, name="output_projection")
+
+    # Style Embedding
+    with tf.variable_scope(scope or "build_network", dtype=self.dtype):
+      self.style_embedding = tf.get_variable("style_embedding",
+          [NUM_STYLES, self.num_units])
 
     with tf.variable_scope(scope or "dynamic_seq2seq", dtype=self.dtype):
       # Encoder
@@ -388,9 +390,12 @@ class BaseModel(object):
       if self.extract_encoder_layers:
         return
 
+      self.tmp_encoder_state = encoder_state
+
       ## Decoder
       logits, decoder_cell_outputs, sample_id, final_context_state = (
-          self._build_decoder(self.encoder_outputs, encoder_state, hparams))
+          self._build_decoder(self.encoder_outputs, encoder_state,
+                              hparams))
 
       ## Loss
       if self.mode != tf.contrib.learn.ModeKeys.INFER:
@@ -434,8 +439,8 @@ class BaseModel(object):
 
   def _get_infer_maximum_iterations(self, hparams, source_sequence_length):
     """Maximum decoding steps at inference time."""
-    if hparams.tgt_max_len_infer:
-      maximum_iterations = hparams.tgt_max_len_infer
+    if hparams.max_len_infer:
+      maximum_iterations = hparams.max_len_infer
       utils.print_out("  decoding maximum_iterations %d" % maximum_iterations)
     else:
       # TODO(thangluong): add decoding_length_factor flag
@@ -457,9 +462,9 @@ class BaseModel(object):
       A tuple of final logits and final decoder state:
         logits: size [time, batch_size, vocab_size] when time_major=True.
     """
-    tgt_sos_id = tf.cast(self.tgt_vocab_table.lookup(tf.constant(hparams.sos)),
+    tgt_sos_id = tf.cast(self.vocab_table.lookup(tf.constant(hparams.sos)),
                          tf.int32)
-    tgt_eos_id = tf.cast(self.tgt_vocab_table.lookup(tf.constant(hparams.eos)),
+    tgt_eos_id = tf.cast(self.vocab_table.lookup(tf.constant(hparams.eos)),
                          tf.int32)
     iterator = self.iterator
 
@@ -485,7 +490,7 @@ class BaseModel(object):
         if self.time_major:
           target_input = tf.transpose(target_input)
         decoder_emb_inp = tf.nn.embedding_lookup(
-            self.embedding_decoder, target_input)
+            self.embedding, target_input)
 
         # Helper
         helper = tf.contrib.seq2seq.TrainingHelper(
@@ -543,7 +548,7 @@ class BaseModel(object):
 
           my_decoder = tf.contrib.seq2seq.BeamSearchDecoder(
               cell=cell,
-              embedding=self.embedding_decoder,
+              embedding=self.embedding,
               start_tokens=start_tokens,
               end_token=end_token,
               initial_state=decoder_initial_state,
@@ -557,12 +562,12 @@ class BaseModel(object):
               "sampling_temperature must greater than 0.0 when using sample"
               " decoder.")
           helper = tf.contrib.seq2seq.SampleEmbeddingHelper(
-              self.embedding_decoder, start_tokens, end_token,
+              self.embedding, start_tokens, end_token,
               softmax_temperature=sampling_temperature,
               seed=self.random_seed)
         elif infer_mode == "greedy":
           helper = tf.contrib.seq2seq.GreedyEmbeddingHelper(
-              self.embedding_decoder, start_tokens, end_token)
+              self.embedding, start_tokens, end_token)
         else:
           raise ValueError("Unknown infer_mode '%s'", infer_mode)
 
@@ -624,11 +629,11 @@ class BaseModel(object):
 
       crossent = tf.nn.sampled_softmax_loss(
           weights=tf.transpose(self.output_layer.kernel),
-          biases=self.output_layer.bias or tf.zeros([self.tgt_vocab_size]),
+          biases=self.output_layer.bias or tf.zeros([self.vocab_size]),
           labels=labels,
           inputs=inputs,
           num_sampled=self.num_sampled_softmax,
-          num_classes=self.tgt_vocab_size,
+          num_classes=self.vocab_size,
           partition_strategy="div",
           seed=self.random_seed)
 
@@ -720,11 +725,13 @@ class Model(BaseModel):
   This class implements a multi-layer recurrent neural network as encoder,
   and a multi-layer recurrent neural network decoder.
   """
-  def _build_encoder_from_sequence(self, hparams, sequence, sequence_length):
+  def _build_encoder_from_sequence(self, hparams, sequence,
+                                   style_label, sequence_length):
     """Build an encoder from a sequence.
 
     Args:
       hparams: hyperparameters.
+      initial_state: initial state for RNN - contains style embedding.
       sequence: tensor with input sequence data.
       sequence_length: tensor with length of the input sequence.
 
@@ -744,8 +751,17 @@ class Model(BaseModel):
     with tf.variable_scope("encoder") as scope:
       dtype = scope.dtype
 
+      # Create encoder_initial_state
+      style_emb_inp = tf.nn.embedding_lookup(self.style_embedding,
+                                             style_label)
+      content_emb_inp = tf.zeros([tf.shape(style_emb_inp)[0],
+                                       self.num_units])
+      encoder_initial_state = tf.nn.rnn_cell.LSTMStateTuple(style_emb_inp,
+                                                            content_emb_inp)
+      
+      # Look up embeddings for each token in sequence
       self.encoder_emb_inp = self.encoder_emb_lookup_fn(
-          self.embedding_encoder, sequence)
+          self.embedding, sequence)
 
       # Encoder_outputs: [max_time, batch_size, num_units]
       if hparams.encoder_type == "uni":
@@ -757,6 +773,7 @@ class Model(BaseModel):
         encoder_outputs, encoder_state = tf.nn.dynamic_rnn(
             cell,
             self.encoder_emb_inp,
+            initial_state=encoder_initial_state,
             dtype=dtype,
             sequence_length=sequence_length,
             time_major=self.time_major,
@@ -788,6 +805,17 @@ class Model(BaseModel):
       else:
         raise ValueError("Unknown encoder_type %s" % hparams.encoder_type)
 
+
+    encoder_state = tf.cond(self.decode_transfer,
+                            lambda: tf.nn.rnn_cell.LSTMStateTuple(
+                                tf.nn.embedding_lookup(self.style_embedding,
+                                                       style_label),
+                                encoder_state[1]),
+                            lambda: tf.nn.rnn_cell.LSTMStateTuple(
+                                tf.nn.embedding_lookup(self.style_embedding,
+                                                       1-style_label),
+                                encoder_state[1]))
+
     # Use the top layer for now
     self.encoder_state_list = [encoder_outputs]
 
@@ -796,8 +824,8 @@ class Model(BaseModel):
   def _build_encoder(self, hparams):
     """Build encoder from source."""
     utils.print_out("# Build a basic encoder")
-    return self._build_encoder_from_sequence(
-        hparams, self.iterator.source, self.iterator.source_sequence_length)
+    return self._build_encoder_from_sequence(hparams, self.iterator.source,
+               self.iterator.style_label, self.iterator.source_sequence_length)
 
   def _build_bidirectional_rnn(self, inputs, sequence_length,
                                dtype, hparams,

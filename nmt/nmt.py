@@ -35,18 +35,19 @@ utils.check_tensorflow_version()
 
 FLAGS = None
 
-INFERENCE_KEYS = ["src_max_len_infer", "tgt_max_len_infer", "subword_option",
-                  "infer_batch_size", "beam_width",
-                  "length_penalty_weight", "sampling_temperature",
-                  "num_translations_per_input", "infer_mode"]
+INFERENCE_KEYS = ["max_len_infer", "subword_option", "infer_batch_size",
+                  "beam_width", "length_penalty_weight",
+                  "sampling_temperature", "num_translations_per_input",
+                  "infer_mode"]
 
 
 def add_arguments(parser):
   """Build ArgumentParser."""
   parser.register("type", "bool", lambda v: v.lower() == "true")
 
-  # network
-  parser.add_argument("--num_units", type=int, default=32, help="Network size.")
+  # Network
+  parser.add_argument("--num_units", type=int, default=32,
+                      help="Number of hidden units in cell.")
   parser.add_argument("--num_layers", type=int, default=2,
                       help="Network depth.")
   parser.add_argument("--num_encoder_layers", type=int, default=None,
@@ -68,7 +69,7 @@ def add_arguments(parser):
   parser.add_argument("--num_embeddings_partitions", type=int, default=0,
                       help="Number of partitions for embedding vars.")
 
-  # attention mechanisms
+  # Attention mechanisms
   parser.add_argument("--attention", type=str, default="", help="""\
       luong | scaled_luong | bahdanau | normed_bahdanau or set to "" for no
       attention\
@@ -101,7 +102,7 @@ def add_arguments(parser):
       based model.\
       """)
 
-  # optimizer
+  # Optimizer
   parser.add_argument("--optimizer", type=str, default="sgd", help="sgd | adam")
   parser.add_argument("--learning_rate", type=float, default=1.0,
                       help="Learning rate. Adam: 0.001 | 0.0001")
@@ -131,18 +132,18 @@ def add_arguments(parser):
                       help=("Whether try colocating gradients with "
                             "corresponding op"))
 
-  # initializer
+  # Initializer
   parser.add_argument("--init_op", type=str, default="uniform",
                       help="uniform | glorot_normal | glorot_uniform")
   parser.add_argument("--init_weight", type=float, default=0.1,
                       help=("for uniform init_op, initialize weights "
                             "between [-this, this]."))
 
-  # data
-  parser.add_argument("--src", type=str, default=None,
-                      help="Source suffix, e.g., en.")
-  parser.add_argument("--tgt", type=str, default=None,
-                      help="Target suffix, e.g., de.")
+  # Data
+  parser.add_argument("--style_A", type=str, default=None,
+                      help="Style A suffix, e.g., male.")
+  parser.add_argument("--style_B", type=str, default=None,
+                      help="Style B suffix, e.g., female.")
   parser.add_argument("--train_prefix", type=str, default=None,
                       help="Train prefix, expect files with src/tgt suffixes.")
   parser.add_argument("--dev_prefix", type=str, default=None,
@@ -153,23 +154,17 @@ def add_arguments(parser):
                       help="Store log/model files.")
 
   # Vocab
-  parser.add_argument("--vocab_prefix", type=str, default=None, help="""\
-      Vocab prefix, expect files with src/tgt suffixes.\
+  parser.add_argument("--vocab_filename", type=str, default=None, help="""\
+      Vocab filename.\
       """)
-  parser.add_argument("--embed_prefix", type=str, default=None, help="""\
-      Pretrained embedding prefix, expect files with src/tgt suffixes.
-      The embedding files should be Glove formated txt files.\
+  parser.add_argument("--embed_filename", type=str, default=None, help="""\
+      Pretrained embedding filename.  The embedding files should be Glove
+      formated txt files.\
       """)
   parser.add_argument("--sos", type=str, default="<s>",
                       help="Start-of-sentence symbol.")
   parser.add_argument("--eos", type=str, default="</s>",
                       help="End-of-sentence symbol.")
-  parser.add_argument("--share_vocab", type="bool", nargs="?", const=True,
-                      default=False,
-                      help="""\
-      Whether to use the source vocab and embeddings for both source and
-      target.\
-      """)
   parser.add_argument("--check_special_token", type="bool", default=True,
                       help="""\
                       Whether check special sos, eos, unk tokens exist in the
@@ -177,15 +172,11 @@ def add_arguments(parser):
                       """)
 
   # Sequence lengths
-  parser.add_argument("--src_max_len", type=int, default=50,
-                      help="Max length of src sequences during training.")
-  parser.add_argument("--tgt_max_len", type=int, default=50,
-                      help="Max length of tgt sequences during training.")
-  parser.add_argument("--src_max_len_infer", type=int, default=None,
-                      help="Max length of src sequences during inference.")
-  parser.add_argument("--tgt_max_len_infer", type=int, default=None,
+  parser.add_argument("--max_len", type=int, default=50,
+                      help="Max length of sequences during training.")
+  parser.add_argument("--max_len_infer", type=int, default=None,
                       help="""\
-      Max length of tgt sequences during inference.  Also use to restrict the
+      Max length of sequences during inference.  Also use to restrict the
       maximum decoding length.\
       """)
 
@@ -315,13 +306,13 @@ def create_hparams(flags):
   """Create training hparams."""
   return tf.contrib.training.HParams(
       # Data
-      src=flags.src,
-      tgt=flags.tgt,
+      style_A=flags.style_A,
+      style_B=flags.style_B,
       train_prefix=flags.train_prefix,
       dev_prefix=flags.dev_prefix,
       test_prefix=flags.test_prefix,
-      vocab_prefix=flags.vocab_prefix,
-      embed_prefix=flags.embed_prefix,
+      vocab_filename=flags.vocab_filename,
+      embed_filename=flags.embed_filename,
       out_dir=flags.out_dir,
 
       # Networks
@@ -358,12 +349,10 @@ def create_hparams(flags):
       # Data constraints
       num_buckets=flags.num_buckets,
       max_train=flags.max_train,
-      src_max_len=flags.src_max_len,
-      tgt_max_len=flags.tgt_max_len,
+      max_len=flags.max_len,
 
       # Inference
-      src_max_len_infer=flags.src_max_len_infer,
-      tgt_max_len_infer=flags.tgt_max_len_infer,
+      max_len_infer=flags.max_len_infer,
       infer_batch_size=flags.infer_batch_size,
 
       # Advanced inference arguments
@@ -386,7 +375,6 @@ def create_hparams(flags):
       epoch_step=0,  # record where we were within an epoch.
       steps_per_stats=flags.steps_per_stats,
       steps_per_external_eval=flags.steps_per_external_eval,
-      share_vocab=flags.share_vocab,
       metrics=flags.metrics.split(","),
       log_device_placement=flags.log_device_placement,
       random_seed=flags.random_seed,
@@ -462,6 +450,8 @@ def extend_hparams(hparams):
 
   # Language modeling
   if getattr(hparams, "language_model", None):
+    raise NotImplementedError("Language Model for Style Transfer is not yet"
+                              "implemented.")
     hparams.attention = ""
     hparams.attention_architecture = ""
     hparams.pass_hidden_state = False
@@ -472,39 +462,23 @@ def extend_hparams(hparams):
 
   ## Vocab
   # Get vocab file names first
-  if hparams.vocab_prefix:
-    src_vocab_file = hparams.vocab_prefix + "." + hparams.src
-    tgt_vocab_file = hparams.vocab_prefix + "." + hparams.tgt
+  if hparams.vocab_filename:
+    vocab_file = hparams.vocab_filename
   else:
-    raise ValueError("hparams.vocab_prefix must be provided.")
+    raise ValueError("hparams.vocab_filename must be provided.")
 
-  # Source vocab
+  # Check vocab
   check_special_token = getattr(hparams, "check_special_token", True)
-  src_vocab_size, src_vocab_file = vocab_utils.check_vocab(
-      src_vocab_file,
+  vocab_size, vocab_file = vocab_utils.check_vocab(
+      vocab_file,
       hparams.out_dir,
       check_special_token=check_special_token,
       sos=hparams.sos,
       eos=hparams.eos,
       unk=vocab_utils.UNK)
 
-  # Target vocab
-  if hparams.share_vocab:
-    utils.print_out("  using source vocab for target")
-    tgt_vocab_file = src_vocab_file
-    tgt_vocab_size = src_vocab_size
-  else:
-    tgt_vocab_size, tgt_vocab_file = vocab_utils.check_vocab(
-        tgt_vocab_file,
-        hparams.out_dir,
-        check_special_token=check_special_token,
-        sos=hparams.sos,
-        eos=hparams.eos,
-        unk=vocab_utils.UNK)
-  _add_argument(hparams, "src_vocab_size", src_vocab_size)
-  _add_argument(hparams, "tgt_vocab_size", tgt_vocab_size)
-  _add_argument(hparams, "src_vocab_file", src_vocab_file)
-  _add_argument(hparams, "tgt_vocab_file", tgt_vocab_file)
+  _add_argument(hparams, "vocab_size", vocab_size)
+  _add_argument(hparams, "vocab_file", vocab_file)
 
   # Num embedding partitions
   num_embeddings_partitions = getattr(hparams, "num_embeddings_partitions", 0)
@@ -512,31 +486,19 @@ def extend_hparams(hparams):
   _add_argument(hparams, "num_dec_emb_partitions", num_embeddings_partitions)
 
   # Pretrained Embeddings
-  _add_argument(hparams, "src_embed_file", "")
-  _add_argument(hparams, "tgt_embed_file", "")
-  if getattr(hparams, "embed_prefix", None):
-    src_embed_file = hparams.embed_prefix + "." + hparams.src
-    tgt_embed_file = hparams.embed_prefix + "." + hparams.tgt
+  _add_argument(hparams, "embed_file", "")
+  if getattr(hparams, "embed_filename", None):
+    embed_file = hparams.embed_filename
 
-    if tf.gfile.Exists(src_embed_file):
-      utils.print_out("  src_embed_file %s exist" % src_embed_file)
-      hparams.src_embed_file = src_embed_file
+    if tf.gfile.Exists(embed_file):
+      utils.print_out("  embed_file %s exist" % embed_file)
+      hparams.embed_file = embed_file
 
       utils.print_out(
           "For pretrained embeddings, set num_enc_emb_partitions to 1")
       hparams.num_enc_emb_partitions = 1
     else:
-      utils.print_out("  src_embed_file %s doesn't exist" % src_embed_file)
-
-    if tf.gfile.Exists(tgt_embed_file):
-      utils.print_out("  tgt_embed_file %s exist" % tgt_embed_file)
-      hparams.tgt_embed_file = tgt_embed_file
-
-      utils.print_out(
-          "For pretrained embeddings, set num_dec_emb_partitions to 1")
-      hparams.num_dec_emb_partitions = 1
-    else:
-      utils.print_out("  tgt_embed_file %s doesn't exist" % tgt_embed_file)
+      utils.print_out("  embed_file %s doesn't exist" % embed_file)
 
   # Evaluation
   for metric in hparams.metrics:
@@ -558,6 +520,9 @@ def ensure_compatible_hparams(hparams, default_hparams, hparams_path=""):
   """Make sure the loaded hparams is compatible with new changes."""
   default_hparams = utils.maybe_parse_standard_hparams(
       default_hparams, hparams_path)
+
+  ### NOTE: Come back to this to --> this makes sure that hparams loaded 
+  ###       from a saved model are valid.
 
   # Set num encoder/decoder layers (for old checkpoints)
   if hasattr(hparams, "num_layers"):
