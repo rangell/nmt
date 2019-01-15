@@ -361,10 +361,6 @@ class BaseModel(object):
     """
     utils.print_out("# Creating %s graph ..." % self.mode)
 
-    # predicate determining if we want to auto-encode(False)
-    # or style-transfer(True)
-    self.decode_transfer = tf.placeholder(tf.bool, name="decode_transfer")
-
     # Projection
     if not self.extract_encoder_layers:
       with tf.variable_scope(scope or "build_network"):
@@ -377,38 +373,97 @@ class BaseModel(object):
       self.style_embedding = tf.get_variable("style_embedding",
           [NUM_STYLES, self.num_units])
 
-    with tf.variable_scope(scope or "dynamic_seq2seq", dtype=self.dtype):
-      # Encoder
-      if hparams.language_model:  # no encoder for language modeling
-        utils.print_out("  language modeling: no encoder")
-        self.encoder_outputs = None
-        encoder_state = None
-      else:
-        self.encoder_outputs, encoder_state = self._build_encoder(hparams)
+    with tf.variable_scope(scope or "dynamic_seq2seq", dtype=self.dtype,
+        reuse=tf.AUTO_REUSE):
+      if hparams.language_model:
+        return self._build_language_model(hparams)
 
-      # Skip decoder if extracting only encoder layers
-      if self.extract_encoder_layers:
-        return
+      assert not self.extract_encoder_layers
 
-      self.tmp_encoder_state = encoder_state
+      sequence = self.iterator.source
+      sequence_length = self.iterator.source_sequence_length
+      style_label = self.iterator.style_label
 
-      ## Decoder
-      logits, decoder_cell_outputs, sample_id, final_context_state = (
-          self._build_decoder(self.encoder_outputs, encoder_state,
-                              hparams))
+      # Get initial state for encoder
+      init_state = self._init_style_state(hparams, switch_style=False,
+                                          prev_state=None)
+      ## Encode sequence
+      self.encoder_outputs, encoder_state = self._build_encoder(hparams,
+          sequence, sequence_length, init_state)
+
+      # Create initial state for AE decoder
+      init_state = self._init_style_state(hparams, switch_style=False,
+                                          prev_state=encoder_state)
+
+      ## Auto-encode decode
+      (ae_logits, ae_decoder_cell_outputs, 
+       ae_sample_id, ae_final_context_state) = (self._build_decoder(hparams,
+         self.encoder_outputs, init_state, sequence_length))
+
+      # Create initial state for transfer decoder
+      init_state = self._init_style_state(hparams, switch_style=True,
+                                          prev_state=encoder_state)
+
+      ## Transfer decode
+      logits, _, _, _ = (
+              self._build_decoder(hparams, self.encoder_outputs, init_state,
+                                  sequence_length))
+
+      # Get transferred sequence
+      transferred_sequence = tf.transpose(tf.argmax(logits, axis=2))
+      transferred_sequence_length = tf.fill(tf.shape(sequence_length),
+                                            tf.shape(transferred_sequence)[1])
+
+      # Stop gradient from back-propagating all the way through
+      transferred_sequence = tf.stop_gradient(transferred_sequence)
+      
+      # Create initial state for back-translating encoder
+      init_state = self._init_style_state(hparams, switch_style=True,
+                                          prev_state=None)
+
+      ## Encode transferred sequence
+      tsf_encoder_outputs, tsf_encoder_state = self._build_encoder(hparams,
+          transferred_sequence, transferred_sequence_length, init_state)
+
+      # Create initial state for back-translating decoder
+      init_state = self._init_style_state(hparams, switch_style=False,
+                                          prev_state=tsf_encoder_state)
+
+      ## Back-translate decode
+      (bt_logits, bt_decoder_cell_outputs, 
+       bt_sample_id, bt_final_context_state) = (self._build_decoder(hparams,
+         tsf_encoder_outputs, init_state, transferred_sequence_length))
 
       ## Loss
       if self.mode != tf.contrib.learn.ModeKeys.INFER:
         with tf.device(model_helper.get_device_str(self.num_encoder_layers - 1,
                                                    self.num_gpus)):
-          loss = self._compute_loss(logits, decoder_cell_outputs)
+          loss = self._compute_loss(ae_logits, ae_decoder_cell_outputs)
       else:
         loss = tf.constant(0.0)
 
-      return logits, loss, final_context_state, sample_id
+      return ae_logits, loss, ae_final_context_state, ae_sample_id
+
+  def _build_language_model(self, hparams):
+    ## TODO: make this work for style -- this is currently wrong
+    raise NotImplementedError("Language model for style not implemented.")
+
+    ## Decoder
+    logits, decoder_cell_outputs, sample_id, final_context_state = (
+      self._build_decoder(None, None, hparams))
+
+    ## Loss
+    if self.mode != tf.contrib.learn.ModeKeys.INFER:
+      with tf.device(model_helper.get_device_str(self.num_encoder_layers - 1,
+                                                 self.num_gpus)):
+        loss = self._compute_loss(logits, decoder_cell_outputs)
+    else:
+      loss = tf.constant(0.0)
+
+    return logits, loss, final_context_state, sample_id
 
   @abc.abstractmethod
-  def _build_encoder(self, hparams):
+  def _build_encoder(self, hparams, sequence, sequence_length, init_state):
     """Subclass must implement this.
 
     Build and run an RNN encoder.
@@ -420,6 +475,24 @@ class BaseModel(object):
       A tuple of encoder_outputs and encoder_state.
     """
     pass
+
+  def _init_style_state(self, hparams, switch_style=False, prev_state=None):
+    assert hparams.unit_type == "lstm" \
+           or hparams.unit_type == "layer_norm_lstm"
+
+    switch_style = tf.cast(switch_style, tf.bool)
+
+    style_emb_inp = tf.cond(switch_style,
+                            lambda: tf.nn.embedding_lookup(self.style_embedding,
+                                           1-self.iterator.style_label),
+                            lambda: tf.nn.embedding_lookup(self.style_embedding,
+                                           self.iterator.style_label))
+    if prev_state == None:
+      content_emb_inp = tf.zeros([tf.shape(style_emb_inp)[0], self.num_units])
+    else:
+      content_emb_inp = prev_state[1]     
+
+    return tf.nn.rnn_cell.LSTMStateTuple(style_emb_inp, content_emb_inp)
 
   def _build_encoder_cell(self, hparams, num_layers, num_residual_layers,
                           base_gpu=0):
@@ -437,7 +510,7 @@ class BaseModel(object):
         base_gpu=base_gpu,
         single_cell_fn=self.single_cell_fn)
 
-  def _get_infer_maximum_iterations(self, hparams, source_sequence_length):
+  def _get_infer_maximum_iterations(self, hparams, sequence_length):
     """Maximum decoding steps at inference time."""
     if hparams.max_len_infer:
       maximum_iterations = hparams.max_len_infer
@@ -445,18 +518,20 @@ class BaseModel(object):
     else:
       # TODO(thangluong): add decoding_length_factor flag
       decoding_length_factor = 2.0
-      max_encoder_length = tf.reduce_max(source_sequence_length)
+      max_encoder_length = tf.reduce_max(sequence_length)
       maximum_iterations = tf.to_int32(tf.round(
           tf.to_float(max_encoder_length) * decoding_length_factor))
     return maximum_iterations
 
-  def _build_decoder(self, encoder_outputs, encoder_state, hparams):
+  def _build_decoder(self, hparams, encoder_outputs, init_state,
+                     sequence_length):
     """Build and run a RNN decoder with a final projection layer.
 
     Args:
-      encoder_outputs: The outputs of encoder for every time step.
-      encoder_state: The final state of the encoder.
       hparams: The Hyperparameters configurations.
+      encoder_outputs: The outputs of encoder for every time step.
+      init_state: The initial state of the encoder.
+      sequence_length: The length of the sequence fed to encoder.
 
     Returns:
       A tuple of final logits and final decoder state:
@@ -470,13 +545,13 @@ class BaseModel(object):
 
     # maximum_iteration: The maximum decoding steps.
     maximum_iterations = self._get_infer_maximum_iterations(
-        hparams, iterator.source_sequence_length)
+        hparams, sequence_length)
 
     ## Decoder.
     with tf.variable_scope("decoder") as decoder_scope:
       cell, decoder_initial_state = self._build_decoder_cell(
-          hparams, encoder_outputs, encoder_state,
-          iterator.source_sequence_length)
+          hparams, encoder_outputs, init_state,
+          sequence_length)
 
       # Optional ops depends on which mode we are in and which loss function we
       # are using.
@@ -600,15 +675,15 @@ class BaseModel(object):
     return tensor.shape[time_axis].value or tf.shape(tensor)[time_axis]
 
   @abc.abstractmethod
-  def _build_decoder_cell(self, hparams, encoder_outputs, encoder_state,
-                          source_sequence_length):
+  def _build_decoder_cell(self, hparams, encoder_outputs, init_state,
+                          source_sequence_length, base_gpu=0):
     """Subclass must implement this.
 
     Args:
       hparams: Hyperparameters configurations.
       encoder_outputs: The outputs of encoder for every time step.
-      encoder_state: The final state of the encoder.
-      source_sequence_length: sequence length of encoder_outputs.
+      init_state: The initial state of the encoder.
+      sequence_length: sequence length of encoder_outputs.
 
     Returns:
       A tuple of a multi-layer RNN cell used by decoder and the intial state of
@@ -725,8 +800,7 @@ class Model(BaseModel):
   This class implements a multi-layer recurrent neural network as encoder,
   and a multi-layer recurrent neural network decoder.
   """
-  def _build_encoder_from_sequence(self, hparams, sequence,
-                                   style_label, sequence_length):
+  def _build_encoder(self, hparams, sequence, sequence_length, init_state):
     """Build an encoder from a sequence.
 
     Args:
@@ -742,6 +816,8 @@ class Model(BaseModel):
     Raises:
       ValueError: if encoder_type is neither "uni" nor "bi".
     """
+    utils.print_out("# Build a basic encoder")
+
     num_layers = self.num_encoder_layers
     num_residual_layers = self.num_encoder_residual_layers
 
@@ -750,15 +826,7 @@ class Model(BaseModel):
 
     with tf.variable_scope("encoder") as scope:
       dtype = scope.dtype
-
-      # Create encoder_initial_state
-      style_emb_inp = tf.nn.embedding_lookup(self.style_embedding,
-                                             style_label)
-      content_emb_inp = tf.zeros([tf.shape(style_emb_inp)[0],
-                                       self.num_units])
-      encoder_initial_state = tf.nn.rnn_cell.LSTMStateTuple(style_emb_inp,
-                                                            content_emb_inp)
-
+      
       # Look up embeddings for each token in sequence
       self.encoder_emb_inp = self.encoder_emb_lookup_fn(
           self.embedding, sequence)
@@ -773,7 +841,7 @@ class Model(BaseModel):
         encoder_outputs, encoder_state = tf.nn.dynamic_rnn(
             cell,
             self.encoder_emb_inp,
-            initial_state=encoder_initial_state,
+            initial_state=init_state,
             dtype=dtype,
             sequence_length=sequence_length,
             time_major=self.time_major,
@@ -805,27 +873,10 @@ class Model(BaseModel):
       else:
         raise ValueError("Unknown encoder_type %s" % hparams.encoder_type)
 
-
-    encoder_state = tf.cond(self.decode_transfer,
-                            lambda: tf.nn.rnn_cell.LSTMStateTuple(
-                                tf.nn.embedding_lookup(self.style_embedding,
-                                                       style_label),
-                                encoder_state[1]),
-                            lambda: tf.nn.rnn_cell.LSTMStateTuple(
-                                tf.nn.embedding_lookup(self.style_embedding,
-                                                       1-style_label),
-                                encoder_state[1]))
-
     # Use the top layer for now
     self.encoder_state_list = [encoder_outputs]
 
     return encoder_outputs, encoder_state
-
-  def _build_encoder(self, hparams):
-    """Build encoder from source."""
-    utils.print_out("# Build a basic encoder")
-    return self._build_encoder_from_sequence(hparams, self.iterator.source,
-               self.iterator.style_label, self.iterator.source_sequence_length)
 
   def _build_bidirectional_rnn(self, inputs, sequence_length,
                                dtype, hparams,
@@ -851,10 +902,6 @@ class Model(BaseModel):
     fw_cell = self._build_encoder_cell(hparams,
                                        num_bi_layers,
                                        num_bi_residual_layers,
-                                       base_gpu=base_gpu)
-    bw_cell = self._build_encoder_cell(hparams,
-                                       num_bi_layers,
-                                       num_bi_residual_layers,
                                        base_gpu=(base_gpu + num_bi_layers))
 
     bi_outputs, bi_state = tf.nn.bidirectional_dynamic_rnn(
@@ -868,7 +915,7 @@ class Model(BaseModel):
 
     return tf.concat(bi_outputs, -1), bi_state
 
-  def _build_decoder_cell(self, hparams, encoder_outputs, encoder_state,
+  def _build_decoder_cell(self, hparams, encoder_outputs, init_state,
                           source_sequence_length, base_gpu=0):
     """Build an RNN cell that can be used by decoder."""
     # We only make use of encoder_outputs in attention-based models
@@ -885,8 +932,7 @@ class Model(BaseModel):
         num_gpus=self.num_gpus,
         mode=self.mode,
         single_cell_fn=self.single_cell_fn,
-        base_gpu=base_gpu
-    )
+        base_gpu=base_gpu)
 
     if hparams.language_model:
       encoder_state = cell.zero_state(self.batch_size, self.dtype)

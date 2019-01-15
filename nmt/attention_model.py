@@ -73,13 +73,13 @@ class AttentionModel(model.Model):
     batch_size = self.batch_size * beam_width
     return memory, source_sequence_length, encoder_state, batch_size
 
-  def _build_decoder_cell(self, hparams, encoder_outputs, encoder_state,
-                          source_sequence_length):
+  def _build_decoder_cell(self, hparams, encoder_outputs, init_state,
+                          source_sequence_length, base_gpu=0):
     """Build a RNN cell with attention mechanism that can be used by decoder."""
     # No Attention
     if not self.has_attention:
       return super(AttentionModel, self)._build_decoder_cell(
-          hparams, encoder_outputs, encoder_state, source_sequence_length)
+          hparams, encoder_outputs, init_state, source_sequence_length)
     elif hparams.attention_architecture != "standard":
       raise ValueError(
           "Unknown attention architecture %s" % hparams.attention_architecture)
@@ -99,16 +99,16 @@ class AttentionModel(model.Model):
 
     if (self.mode == tf.contrib.learn.ModeKeys.INFER and
         infer_mode == "beam_search"):
-      memory, source_sequence_length, encoder_state, batch_size = (
+      memory, source_sequence_length, init_state, batch_size = (
           self._prepare_beam_search_decoder_inputs(
               hparams.beam_width, memory, source_sequence_length,
-              encoder_state))
+              init_state))
     else:
       batch_size = self.batch_size
 
     # Attention
-    attention_mechanism = self.attention_mechanism_fn(
-        hparams.attention, num_units, memory, source_sequence_length, self.mode)
+    attention_mechanism = self.attention_mechanism_fn(hparams.attention,
+        num_units, memory, source_sequence_length,self.mode)
 
     cell = model_helper.create_rnn_cell(
         unit_type=hparams.unit_type,
@@ -120,6 +120,7 @@ class AttentionModel(model.Model):
         num_gpus=self.num_gpus,
         mode=self.mode,
         single_cell_fn=self.single_cell_fn)
+
 
     # Only generate alignment in greedy INFER mode.
     alignment_history = (self.mode == tf.contrib.learn.ModeKeys.INFER and
@@ -137,11 +138,8 @@ class AttentionModel(model.Model):
                                         model_helper.get_device_str(
                                             num_layers - 1, self.num_gpus))
 
-    if hparams.pass_hidden_state:
-      decoder_initial_state = cell.zero_state(batch_size, dtype).clone(
-          cell_state=encoder_state)
-    else:
-      decoder_initial_state = cell.zero_state(batch_size, dtype)
+    decoder_initial_state = cell.zero_state(batch_size, dtype).clone(
+        cell_state=init_state)
 
     return cell, decoder_initial_state
 
@@ -152,7 +150,7 @@ class AttentionModel(model.Model):
 
 
 def create_attention_mechanism(attention_option, num_units, memory,
-                               source_sequence_length, mode, reuse=False):
+                               source_sequence_length, mode):
   """Create attention mechanism based on the attention_option."""
   del mode  # unused
 
@@ -161,33 +159,26 @@ def create_attention_mechanism(attention_option, num_units, memory,
     attention_mechanism = attention_mechanisms.ReusableLuongAttention(
         num_units,
         memory,
-        memory_sequence_length=source_sequence_length,
-        reuse=reuse)
+        memory_sequence_length=source_sequence_length)
   elif attention_option == "scaled_luong":
     attention_mechanism = attention_mechanisms.ReusableLuongAttention(
         num_units,
         memory,
         memory_sequence_length=source_sequence_length,
-        scale=True,
-        reuse=reuse)
+        scale=True)
   elif attention_option == "bahdanau":
     attention_mechanism = attention_mechanisms.ReusableBahdanauAttention(
         num_units,
         memory,
-        memory_sequence_length=source_sequence_length,
-        reuse=reuse)
+        memory_sequence_length=source_sequence_length)
   elif attention_option == "normed_bahdanau":
     attention_mechanism = attention_mechanisms.ReusableBahdanauAttention(
         num_units,
         memory,
         memory_sequence_length=source_sequence_length,
-        normalize=True,
-        reuse=reuse)
+        normalize=True)
   else:
     raise ValueError("Unknown attention option %s" % attention_option)
-
-  print("Created {} attention mechanism!!!".format(attention_option))
-  exit()
 
   return attention_mechanism
 

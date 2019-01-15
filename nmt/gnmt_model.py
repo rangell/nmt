@@ -52,10 +52,13 @@ class GNMTModel(attention_model.AttentionModel):
         scope=scope,
         extra_args=extra_args)
 
-  def _build_encoder(self, hparams):
+  def _build_encoder(self, hparams, sequence, sequence_length, init_state):
     """Build a GNMT encoder."""
     if hparams.encoder_type == "uni" or hparams.encoder_type == "bi":
-      return super(GNMTModel, self)._build_encoder(hparams)
+      return super(GNMTModel, self)._build_encoder(hparams,
+                                                   sequence,
+                                                   sequence_length,
+                                                   init_state)
 
     if hparams.encoder_type != "gnmt":
       raise ValueError("Unknown encoder_type %s" % hparams.encoder_type)
@@ -67,21 +70,19 @@ class GNMTModel(attention_model.AttentionModel):
     utils.print_out("  num_bi_layers = %d" % num_bi_layers)
     utils.print_out("  num_uni_layers = %d" % num_uni_layers)
 
-    iterator = self.iterator
-    source = iterator.source
     if self.time_major:
-      source = tf.transpose(source)
+      sequence = tf.transpose(sequence)
 
     with tf.variable_scope("encoder") as scope:
       dtype = scope.dtype
 
       self.encoder_emb_inp = self.encoder_emb_lookup_fn(
-          self.embedding_encoder, source)
+          self.embedding_encoder, sequence)
 
       # Execute _build_bidirectional_rnn from Model class
       bi_encoder_outputs, bi_encoder_state = self._build_bidirectional_rnn(
           inputs=self.encoder_emb_inp,
-          sequence_length=iterator.source_sequence_length,
+          sequence_length=sequence_length,
           dtype=dtype,
           hparams=hparams,
           num_bi_layers=num_bi_layers,
@@ -91,10 +92,12 @@ class GNMTModel(attention_model.AttentionModel):
       # Build unidirectional layers
       if self.extract_encoder_layers:
         encoder_state, encoder_outputs = self._build_individual_encoder_layers(
-            bi_encoder_outputs, num_uni_layers, dtype, hparams)
+            bi_encoder_outputs, sequence_length,
+            num_uni_layers, dtype, hparams)
       else:
         encoder_state, encoder_outputs = self._build_all_encoder_layers(
-            bi_encoder_outputs, num_uni_layers, dtype, hparams)
+            bi_encoder_outputs, sequence_length,
+            num_uni_layers, dtype, hparams)
 
       # Pass all encoder states to the decoder
       #   except the first bi-directional layer
@@ -103,7 +106,7 @@ class GNMTModel(attention_model.AttentionModel):
 
     return encoder_outputs, encoder_state
 
-  def _build_all_encoder_layers(self, bi_encoder_outputs,
+  def _build_all_encoder_layers(self, bi_encoder_outputs, sequence_length,
                                 num_uni_layers, dtype, hparams):
     """Build encoder layers all at once."""
     uni_cell = model_helper.create_rnn_cell(
@@ -121,7 +124,7 @@ class GNMTModel(attention_model.AttentionModel):
         uni_cell,
         bi_encoder_outputs,
         dtype=dtype,
-        sequence_length=self.iterator.source_sequence_length,
+        sequence_length=sequence_length,
         time_major=self.time_major)
 
     # Use the top layer for now
@@ -130,7 +133,8 @@ class GNMTModel(attention_model.AttentionModel):
     return encoder_state, encoder_outputs
 
   def _build_individual_encoder_layers(self, bi_encoder_outputs,
-                                       num_uni_layers, dtype, hparams):
+                                       sequence_length, num_uni_layers, dtype,
+                                       hparams):
     """Run each of the encoder layer separately, not used in general seq2seq."""
     uni_cell_lists = model_helper._cell_list(
         unit_type=hparams.unit_type,
@@ -155,7 +159,7 @@ class GNMTModel(attention_model.AttentionModel):
               cell,
               encoder_inp,
               dtype=dtype,
-              sequence_length=self.iterator.source_sequence_length,
+              sequence_length=sequence_length,
               time_major=self.time_major,
               scope=scope)
           encoder_states.append(encoder_state)
@@ -172,6 +176,7 @@ class GNMTModel(attention_model.AttentionModel):
     if not self.is_gnmt_attention:
       return super(GNMTModel, self)._build_decoder_cell(
           hparams, encoder_outputs, encoder_state, source_sequence_length)
+          
 
     # GNMT attention
     attention_option = hparams.attention

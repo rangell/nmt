@@ -350,7 +350,8 @@ def create_emb_for_encoder_and_decoder(vocab_size,
 
 
 def _single_cell(unit_type, num_units, forget_bias, dropout, mode,
-                 residual_connection=False, device_str=None, residual_fn=None):
+                 residual_connection=False, device_str=None, residual_fn=None,
+                 reuse=False):
   """Create an instance of a single RNN cell."""
   # dropout (= 1 - keep_prob) is set to 0 during eval and infer
   dropout = dropout if mode == tf.contrib.learn.ModeKeys.TRAIN else 0.0
@@ -360,20 +361,23 @@ def _single_cell(unit_type, num_units, forget_bias, dropout, mode,
     utils.print_out("  LSTM, forget_bias=%g" % forget_bias, new_line=False)
     single_cell = tf.contrib.rnn.BasicLSTMCell(
         num_units,
-        forget_bias=forget_bias)
+        forget_bias=forget_bias,
+        reuse=reuse)
   elif unit_type == "gru":
     utils.print_out("  GRU", new_line=False)
-    single_cell = tf.contrib.rnn.GRUCell(num_units)
+    single_cell = tf.contrib.rnn.GRUCell(num_units, reuse=reuse)
   elif unit_type == "layer_norm_lstm":
     utils.print_out("  Layer Normalized LSTM, forget_bias=%g" % forget_bias,
-                    new_line=False)
+                    new_line=False,
+                    reuse=reuse)
     single_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(
         num_units,
         forget_bias=forget_bias,
-        layer_norm=True)
+        layer_norm=True,
+        reuse=reuse)
   elif unit_type == "nas":
     utils.print_out("  NASCell", new_line=False)
-    single_cell = tf.contrib.rnn.NASCell(num_units)
+    single_cell = tf.contrib.rnn.NASCell(num_units, reuse=reuse)
   else:
     raise ValueError("Unknown unit type %s!" % unit_type)
 
@@ -401,11 +405,11 @@ def _single_cell(unit_type, num_units, forget_bias, dropout, mode,
 
 def _cell_list(unit_type, num_units, num_layers, num_residual_layers,
                forget_bias, dropout, mode, num_gpus, base_gpu=0,
-               single_cell_fn=None, residual_fn=None):
+               single_cell_fn=None, residual_fn=None, reuse=False):
   """Create a list of RNN cells."""
   if not single_cell_fn:
     single_cell_fn = _single_cell
-
+  
   # Multi-GPU
   cell_list = []
   for i in range(num_layers):
@@ -418,7 +422,8 @@ def _cell_list(unit_type, num_units, num_layers, num_residual_layers,
         mode=mode,
         residual_connection=(i >= num_layers - num_residual_layers),
         device_str=get_device_str(i + base_gpu, num_gpus),
-        residual_fn=residual_fn
+        residual_fn=residual_fn,
+        reuse=reuse
     )
     utils.print_out("")
     cell_list.append(single_cell)
@@ -428,7 +433,7 @@ def _cell_list(unit_type, num_units, num_layers, num_residual_layers,
 
 def create_rnn_cell(unit_type, num_units, num_layers, num_residual_layers,
                     forget_bias, dropout, mode, num_gpus, base_gpu=0,
-                    single_cell_fn=None):
+                    single_cell_fn=None, reuse=False):
   """Create multi-layer RNN cell.
 
   Args:
@@ -461,7 +466,8 @@ def create_rnn_cell(unit_type, num_units, num_layers, num_residual_layers,
                          mode=mode,
                          num_gpus=num_gpus,
                          base_gpu=base_gpu,
-                         single_cell_fn=single_cell_fn)
+                         single_cell_fn=single_cell_fn,
+                         reuse=reuse)
 
   if len(cell_list) == 1:  # Single layer.
     return cell_list[0]

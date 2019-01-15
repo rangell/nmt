@@ -507,11 +507,7 @@ def train(hparams, scope=None, target_session=""):
       train_model.iterator.initializer,
       feed_dict={train_model.skip_count_placeholder: 0})
 
-  #print(train_sess.run(train_model.model.tmp_encoder_state,
-  #    feed_dict={train_model.model.decode_transfer: True}))
-
-  #print(type(train_sess.run(train_model.model.tmp_style_labels,
-  #    feed_dict={train_model.model.decode_transfer: False})))
+  #print(train_sess.run(train_model.model.transferred_sequence_length))
 
   print("Just before first evaluation!")
   exit()
@@ -534,21 +530,6 @@ def train(hparams, scope=None, target_session=""):
     ### Run a step ###
     start_time = time.time()
     try:
-
-      source1, target1 = train_sess.run([train_model.iterator.source,
-                                       train_model.iterator.target_output])
-
-      train_sess.run(
-          train_model.iterator.initializer,
-          feed_dict={train_model.skip_count_placeholder: 0})
-
-      source2, target2 = train_sess.run([train_model.iterator.source,
-                                       train_model.iterator.target_output])
-
-      embed()
-      exit()
-
-
       step_result = loaded_train_model.train(train_sess)
       hparams.epoch_step += 1
     except tf.errors.OutOfRangeError:
