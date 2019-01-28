@@ -52,13 +52,12 @@ class GNMTModel(attention_model.AttentionModel):
         scope=scope,
         extra_args=extra_args)
 
-  def _build_encoder(self, hparams, sequence, sequence_length, init_state):
+  def _build_encoder(self, hparams, sequence, sequence_length):
     """Build a GNMT encoder."""
     if hparams.encoder_type == "uni" or hparams.encoder_type == "bi":
       return super(GNMTModel, self)._build_encoder(hparams,
                                                    sequence,
-                                                   sequence_length,
-                                                   init_state)
+                                                   sequence_length)
 
     if hparams.encoder_type != "gnmt":
       raise ValueError("Unknown encoder_type %s" % hparams.encoder_type)

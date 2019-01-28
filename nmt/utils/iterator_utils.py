@@ -39,7 +39,7 @@ class BatchedInput(
 class StyleBatchedInput(
     collections.namedtuple("BatchedInput",
                            ("initializer", "source", "target_input",
-                            "target_output", "style_label",
+                            "target_output", "style_labels",
                             "source_sequence_length",
                             "target_sequence_length"))):
   pass
@@ -104,42 +104,54 @@ def get_infer_iterator(src_dataset,
       source_sequence_length=src_seq_len,
       target_sequence_length=None)
 
-def get_style_infer_iterator(style_A_dataset,
-                       style_B_dataset,
-                       vocab_table,
-                       batch_size,
-                       eos,
-                       max_len=None,
-                       use_char_encode=False):
+def get_style_infer_iterator(hparams,
+                             text_dataset,
+                             attributes_dataset,
+                             vocab_table,
+                             style_table,
+                             batch_size,
+                             eos,
+                             max_len=None,
+                             num_parallel_calls=4,
+                             use_char_encode=False):
   assert use_char_encode == False
 
   eos_id = tf.cast(vocab_table.lookup(tf.constant(eos)), tf.int32)
 
   ### Build the joint style dataset
-  label0 = tf.data.Dataset.from_tensors(0).repeat()
-  label1 = tf.data.Dataset.from_tensors(1).repeat()
-
-  style_A = tf.data.Dataset.zip((style_A_dataset, label0))
-  style_B = tf.data.Dataset.zip((style_B_dataset, label1))
-
-  joint_dataset = tf.data.experimental.sample_from_datasets([style_A, style_B])
+  joint_dataset = tf.data.Dataset.zip((text_dataset, attributes_dataset))
 
   # Tokenize sentences
   joint_dataset = joint_dataset.map(
-      lambda sent, label: (
-          tf.string_split([sent]).values, label))
+      lambda sent, labels: (
+          tf.string_split([sent]).values, labels),
+      num_parallel_calls=num_parallel_calls)
 
   # Filter zero length input sequences.
   joint_dataset = joint_dataset.filter(lambda sent, _: tf.size(sent) > 0)
 
+  if max_len:
+    joint_dataset = joint_dataset.map(
+        lambda sent, labels: (sent[:max_len], labels),
+        num_parallel_calls=num_parallel_calls).prefetch(output_buffer_size)
+
   # Convert the word strings to ids.  Word strings that are not in the
   # vocab get the lookup table's default_value integer.
   joint_dataset = joint_dataset.map(
-      lambda sent, label: (tf.cast(vocab_table.lookup(sent), tf.int32), label))
+    lambda sent, labels: (tf.cast(vocab_table.lookup(sent), tf.int32), labels))
+
+  # Cast the tuple of style strings to a tensor
+  joint_dataset = joint_dataset.map(
+    lambda sent, labels: (sent, tf.convert_to_tensor(labels)))
+
+  # Convert style strings to ids
+  joint_dataset = joint_dataset.map(
+    lambda sent, labels: (sent, tf.cast(style_table.lookup(labels), tf.int32)))
 
   # Add in sequence lengths
   joint_dataset = joint_dataset.map(
-      lambda sent, label: (sent, label, tf.size(sent)))
+      lambda sent, labels: (sent, labels, tf.size(sent)),
+          num_parallel_calls=num_parallel_calls)
 
   # Bucket by source sequence length (buckets for lengths 0-9, 10-19, ...)
   def batching_func(x):
@@ -150,34 +162,36 @@ def get_style_infer_iterator(style_A_dataset,
         # the source and target row sizes; these are scalars.
         padded_shapes=(
             tf.TensorShape([None]),  # src
-            tf.TensorShape([]),  # label
+            tf.TensorShape([None]),  # labels
             tf.TensorShape([])),  # src_len
         # Pad the source and target sequences with eos tokens.
         # (Though notice we don't generally need to do this since
         # later on we will be masking out calculations past the true sequence.
         padding_values=(
             eos_id,  # src
-            0,  # label -- unused
+            0, # labels -- unused
             0))  # src_len -- unused
 
   batched_dataset = batching_func(joint_dataset)
   batched_iter = batched_dataset.make_initializable_iterator()
-  (src_ids, label, src_seq_len) = batched_iter.get_next()
+  (src_ids, labels, src_seq_len) = batched_iter.get_next()
 
   batched_iter = batched_dataset.make_initializable_iterator()
-  (src_ids, label, src_seq_len) = (batched_iter.get_next())
+  (src_ids, labels, src_seq_len) = (batched_iter.get_next())
   return StyleBatchedInput(
       initializer=batched_iter.initializer,
       source=src_ids,
       target_input=None,
       target_output=None,
-      style_label=label,
+      style_labels=labels,
       source_sequence_length=src_seq_len,
       target_sequence_length=None)
 
-def get_style_iterator(style_A_dataset,
-                       style_B_dataset,
+def get_style_iterator(hparams,
+                       text_dataset,
+                       attributes_dataset,
                        vocab_table,
+                       style_table,
                        batch_size,
                        sos,
                        eos,
@@ -200,13 +214,7 @@ def get_style_iterator(style_A_dataset,
   eos_id = tf.cast(vocab_table.lookup(tf.constant(eos)), tf.int32)
 
   ### Build the joint style dataset
-  label0 = tf.data.Dataset.from_tensors(0).repeat()
-  label1 = tf.data.Dataset.from_tensors(1).repeat()
-
-  style_A = tf.data.Dataset.zip((style_A_dataset, label0))
-  style_B = tf.data.Dataset.zip((style_B_dataset, label1))
-
-  joint_dataset = tf.data.experimental.sample_from_datasets([style_A, style_B])
+  joint_dataset = tf.data.Dataset.zip((text_dataset, attributes_dataset))
 
   # Shard the dataset
   joint_dataset = joint_dataset.apply(tf.data.experimental.filter_for_shard(
@@ -222,17 +230,30 @@ def get_style_iterator(style_A_dataset,
   
   # Tokenize sentences
   joint_dataset = joint_dataset.map(
-      lambda sent, label: (
-          tf.string_split([sent]).values, label),
+      lambda sent, labels: (
+          tf.string_split([sent]).values, labels),
       num_parallel_calls=num_parallel_calls).prefetch(output_buffer_size)
 
   # Filter zero length input sequences.
   joint_dataset = joint_dataset.filter(lambda sent, _: tf.size(sent) > 0)
 
+  if max_len:
+    joint_dataset = joint_dataset.map(
+        lambda sent, labels: (sent[:max_len], labels),
+        num_parallel_calls=num_parallel_calls).prefetch(output_buffer_size)
+  
   # Convert the word strings to ids.  Word strings that are not in the
   # vocab get the lookup table's default_value integer.
   joint_dataset = joint_dataset.map(
-      lambda sent, label: (tf.cast(vocab_table.lookup(sent), tf.int32), label))
+    lambda sent, labels: (tf.cast(vocab_table.lookup(sent), tf.int32), labels))
+
+  # Cast the tuple of style strings to a tensor
+  joint_dataset = joint_dataset.map(
+    lambda sent, labels: (sent, tf.convert_to_tensor(labels)))
+
+  # Convert style strings to ids
+  joint_dataset = joint_dataset.map(
+    lambda sent, labels: (sent, tf.cast(style_table.lookup(labels), tf.int32)))
 
   # Prefetch buffer size
   joint_dataset = joint_dataset.prefetch(output_buffer_size)
@@ -240,40 +261,37 @@ def get_style_iterator(style_A_dataset,
   # Create target prefixed with <sos> (`tgt_input`) and target suffixed with
   # <eos> (`tgt_output`).
   joint_dataset = joint_dataset.map(
-      lambda sent, label: (sent,
+      lambda sent, labels: (sent,
                            tf.concat(([sos_id], sent), 0),
                            tf.concat((sent, [eos_id]), 0),
-                           label),
+                           labels),
       num_parallel_calls=num_parallel_calls).prefetch(output_buffer_size)
 
   # Add in sequence lengths
   joint_dataset = joint_dataset.map(
-      lambda sent, tgt_in, tgt_out, label: (
-          sent, tgt_in, tgt_out, label, tf.size(sent), tf.size(tgt_in)),
+      lambda sent, tgt_in, tgt_out, labels: (
+          sent, tgt_in, tgt_out, labels, tf.size(sent), tf.size(tgt_in)),
       num_parallel_calls=num_parallel_calls)
 
   # Bucket by source sequence length (buckets for lengths 0-9, 10-19, ...)
   def batching_func(x):
     return x.padded_batch(
         batch_size,
-        # The first three entries are the source and target line rows;
-        # these have unknown-length vectors.  The last two entries are
-        # the source and target row sizes; these are scalars.
+        ## The first three entries are the source and target line rows;
+        ## these have unknown-length vectors.  The last two entries are
+        ## the source and target row sizes; these are scalars.
         padded_shapes=(
             tf.TensorShape([None]),  # src
             tf.TensorShape([None]),  # tgt_input
             tf.TensorShape([None]),  # tgt_output
-            tf.TensorShape([]),  # label
+            tf.TensorShape([None]),
             tf.TensorShape([]),  # src_len
             tf.TensorShape([])),  # tgt_len
-        # Pad the source and target sequences with eos tokens.
-        # (Though notice we don't generally need to do this since
-        # later on we will be masking out calculations past the true sequence.
         padding_values=(
             eos_id,  # src
             eos_id,  # tgt_input
             eos_id,  # tgt_output
-            0,  # label -- unused
+            0,  # labels -- unused
             0,  # src_len -- unused
             0))  # tgt_len -- unused
 
@@ -305,14 +323,14 @@ def get_style_iterator(style_A_dataset,
     batched_dataset = batching_func(joint_dataset)
 
   batched_iter = batched_dataset.make_initializable_iterator()
-  (src_ids, tgt_input_ids, tgt_output_ids, label, src_seq_len,
+  (src_ids, tgt_input_ids, tgt_output_ids, labels, src_seq_len,
    tgt_seq_len) = (batched_iter.get_next())
   return StyleBatchedInput(
       initializer=batched_iter.initializer,
       source=src_ids,
       target_input=tgt_input_ids,
       target_output=tgt_output_ids,
-      style_label=label,
+      style_labels=labels,
       source_sequence_length=src_seq_len,
       target_sequence_length=tgt_seq_len)
   

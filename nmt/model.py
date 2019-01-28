@@ -29,13 +29,11 @@ from . import model_helper
 from .utils import iterator_utils
 from .utils import misc_utils as utils
 from .utils import vocab_utils
+from .utils import style_utils
 
 utils.check_tensorflow_version()
 
 __all__ = ["BaseModel", "Model"]
-
-
-NUM_STYLES = 2
 
 
 class TrainOutputTuple(collections.namedtuple(
@@ -134,6 +132,9 @@ class BaseModel(object):
     # Set num units
     self.num_units = hparams.num_units
 
+    # Set num styles
+    self.num_styles = hparams.num_styles
+
     # Set num layers
     self.num_encoder_layers = hparams.num_encoder_layers
     self.num_decoder_layers = hparams.num_decoder_layers
@@ -166,6 +167,14 @@ class BaseModel(object):
     else:
       self.encoder_emb_lookup_fn = tf.nn.embedding_lookup
     self.init_embeddings(hparams, scope)
+
+    # Style Table
+    self.style_table = style_utils.create_style_table(hparams.style_metadata)
+
+    # Style Embeddings
+    self.style_embedding = style_utils.create_style_embedding(
+        num_styles=self.num_styles, embed_size=self.num_units)
+
 
   def _set_train_or_infer(self, res, reverse_vocab_table, hparams):
     """Set up training and inference."""
@@ -368,11 +377,6 @@ class BaseModel(object):
           self.output_layer = tf.layers.Dense(
               self.vocab_size, use_bias=False, name="output_projection")
 
-    # Style Embedding
-    with tf.variable_scope(scope or "build_network", dtype=self.dtype):
-      self.style_embedding = tf.get_variable("style_embedding",
-          [NUM_STYLES, self.num_units])
-
     with tf.variable_scope(scope or "dynamic_seq2seq", dtype=self.dtype,
         reuse=tf.AUTO_REUSE):
       if hparams.language_model:
@@ -382,57 +386,53 @@ class BaseModel(object):
 
       sequence = self.iterator.source
       sequence_length = self.iterator.source_sequence_length
-      style_label = self.iterator.style_label
+      style_labels = self.iterator.style_labels
 
-      # Get initial state for encoder
-      init_state = self._init_style_state(hparams, switch_style=False,
-                                          prev_state=None)
-      ## Encode sequence
+      self.style_labels = style_labels
+
+      ## Auto-encode 
+      noisy_sequence = self._noise_sequence(sequence)
+
       self.encoder_outputs, encoder_state = self._build_encoder(hparams,
-          sequence, sequence_length, init_state)
+          noisy_sequence, sequence_length)
 
-      # Create initial state for AE decoder
-      init_state = self._init_style_state(hparams, switch_style=False,
-                                          prev_state=encoder_state)
-
-      ## Auto-encode decode
+      ### NOTE: Pass style_labels to decoder, so we can pass averaged
+      ### style embeddings as <SOS> to decoder
       (ae_logits, ae_decoder_cell_outputs, 
        ae_sample_id, ae_final_context_state) = (self._build_decoder(hparams,
-         self.encoder_outputs, init_state, sequence_length))
+         self.encoder_outputs, encoder_state, sequence_length, style_labels))
 
-      # Create initial state for transfer decoder
-      init_state = self._init_style_state(hparams, switch_style=True,
-                                          prev_state=encoder_state)
+      ### Back-translate
 
-      ## Transfer decode
-      logits, _, _, _ = (
-              self._build_decoder(hparams, self.encoder_outputs, init_state,
-                                  sequence_length))
+      ### Transfer decode
+      #logits, _, _, _ = (
+      #        self._build_decoder(hparams, self.encoder_outputs, encoder_state,
+      #                            sequence_length))
 
-      # Get transferred sequence
-      transferred_sequence = tf.transpose(tf.argmax(logits, axis=2))
-      transferred_sequence_length = tf.fill(tf.shape(sequence_length),
-                                            tf.shape(transferred_sequence)[1])
+      ## Get transferred sequence
+      #transferred_sequence = tf.transpose(tf.argmax(logits, axis=2))
+      #transferred_sequence_length = tf.fill(tf.shape(sequence_length),
+      #                                      tf.shape(transferred_sequence)[1])
 
-      # Stop gradient from back-propagating all the way through
-      transferred_sequence = tf.stop_gradient(transferred_sequence)
-      
-      # Create initial state for back-translating encoder
-      init_state = self._init_style_state(hparams, switch_style=True,
-                                          prev_state=None)
+      ## Stop gradient from back-propagating all the way through
+      #transferred_sequence = tf.stop_gradient(transferred_sequence)
+      #
+      ## Create initial state for back-translating encoder
+      #init_state = self._init_style_state(hparams, switch_style=True,
+      #                                    prev_state=None)
 
-      ## Encode transferred sequence
-      tsf_encoder_outputs, tsf_encoder_state = self._build_encoder(hparams,
-          transferred_sequence, transferred_sequence_length, init_state)
+      ### Encode transferred sequence
+      #tsf_encoder_outputs, tsf_encoder_state = self._build_encoder(
+      #    hparams, transferred_sequence, transferred_sequence_length)
 
-      # Create initial state for back-translating decoder
-      init_state = self._init_style_state(hparams, switch_style=False,
-                                          prev_state=tsf_encoder_state)
+      ### Create initial state for back-translating decoder
+      ##init_state = self._init_style_state(hparams, switch_style=False,
+      ##                                    prev_state=tsf_encoder_state)
 
-      ## Back-translate decode
-      (bt_logits, bt_decoder_cell_outputs, 
-       bt_sample_id, bt_final_context_state) = (self._build_decoder(hparams,
-         tsf_encoder_outputs, init_state, transferred_sequence_length))
+      ### Back-translate decode
+      #(bt_logits, bt_decoder_cell_outputs, 
+      # bt_sample_id, bt_final_context_state) = (self._build_decoder(hparams,
+      #   tsf_encoder_outputs, tsf_encoder_state, transferred_sequence_length))
 
       ## Loss
       if self.mode != tf.contrib.learn.ModeKeys.INFER:
@@ -463,7 +463,7 @@ class BaseModel(object):
     return logits, loss, final_context_state, sample_id
 
   @abc.abstractmethod
-  def _build_encoder(self, hparams, sequence, sequence_length, init_state):
+  def _build_encoder(self, hparams, sequence, sequence_length):
     """Subclass must implement this.
 
     Build and run an RNN encoder.
@@ -480,19 +480,37 @@ class BaseModel(object):
     assert hparams.unit_type == "lstm" \
            or hparams.unit_type == "layer_norm_lstm"
 
-    switch_style = tf.cast(switch_style, tf.bool)
+    return None
 
-    style_emb_inp = tf.cond(switch_style,
-                            lambda: tf.nn.embedding_lookup(self.style_embedding,
-                                           1-self.iterator.style_label),
-                            lambda: tf.nn.embedding_lookup(self.style_embedding,
-                                           self.iterator.style_label))
-    if prev_state == None:
-      content_emb_inp = tf.zeros([tf.shape(style_emb_inp)[0], self.num_units])
-    else:
-      content_emb_inp = prev_state[1]     
+  def _noise_sequence(self, sequence, word_drop=0.1, permutation_limit=3):
+    """ Noise model from Lample et al. 2017. """
+    # drop words from sequence
+    word_drop_mask = tf.random.uniform(tf.shape(sequence)) > word_drop
+    word_drop_tensor = tf.fill(tf.shape(sequence), vocab_utils.UNK_ID)
+    noisy_sequence = tf.where(word_drop_mask, sequence, word_drop_tensor)
 
-    return tf.nn.rnn_cell.LSTMStateTuple(style_emb_inp, content_emb_inp)
+    # shuffle slightly
+    q = tf.range(tf.cast(tf.shape(sequence)[1], tf.float32))
+    q = tf.tile(q, tf.fill([1], tf.shape(sequence)[0]))
+    q = tf.reshape(q, tf.shape(sequence))
+    q = q + (permutation_limit + 1) * tf.random.uniform(tf.shape(sequence))
+    sigma = tf.contrib.framework.argsort(q)
+
+    batch_index = tf.range(tf.shape(sequence)[0])
+    batch_index = tf.tile(batch_index, tf.fill([1], tf.shape(sequence)[1]))
+    batch_index = tf.transpose(tf.reshape(batch_index,
+                               [tf.shape(sequence)[1], tf.shape(sequence)[0]]))
+
+    indices = tf.stack([batch_index, sigma], axis=2)
+
+    noisy_sequence = tf.gather_nd(noisy_sequence, indices)
+
+    self.sigma = sigma
+    self.batch_index = batch_index
+    self.indices = indices
+    self.noisy_sequence = noisy_sequence
+
+    return noisy_sequence
 
   def _build_encoder_cell(self, hparams, num_layers, num_residual_layers,
                           base_gpu=0):
@@ -524,7 +542,7 @@ class BaseModel(object):
     return maximum_iterations
 
   def _build_decoder(self, hparams, encoder_outputs, init_state,
-                     sequence_length):
+                     sequence_length, style_labels):
     """Build and run a RNN decoder with a final projection layer.
 
     Args:
@@ -567,9 +585,17 @@ class BaseModel(object):
         decoder_emb_inp = tf.nn.embedding_lookup(
             self.embedding, target_input)
 
+        # Pass style embedding as <SOS> to decoder
+        style_emb_inp = tf.reduce_mean(tf.nn.embedding_lookup(
+            self.style_embedding, style_labels), axis=1)
+        style_emb_inp = tf.expand_dims(style_emb_inp, axis=0)
+
+        decoder_emb_inp_mod = tf.concat([style_emb_inp,
+                                         decoder_emb_inp[1:,:,:]], axis=0)
+
         # Helper
         helper = tf.contrib.seq2seq.TrainingHelper(
-            decoder_emb_inp, iterator.target_sequence_length,
+            decoder_emb_inp_mod, iterator.target_sequence_length,
             time_major=self.time_major)
 
         # Decoder
@@ -800,7 +826,7 @@ class Model(BaseModel):
   This class implements a multi-layer recurrent neural network as encoder,
   and a multi-layer recurrent neural network decoder.
   """
-  def _build_encoder(self, hparams, sequence, sequence_length, init_state):
+  def _build_encoder(self, hparams, sequence, sequence_length):
     """Build an encoder from a sequence.
 
     Args:
@@ -841,7 +867,7 @@ class Model(BaseModel):
         encoder_outputs, encoder_state = tf.nn.dynamic_rnn(
             cell,
             self.encoder_emb_inp,
-            initial_state=init_state,
+            initial_state=None,
             dtype=dtype,
             sequence_length=sequence_length,
             time_major=self.time_major,

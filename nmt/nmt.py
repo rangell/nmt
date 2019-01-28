@@ -17,6 +17,7 @@
 from __future__ import print_function
 
 import argparse
+import json
 import os
 import random
 import sys
@@ -140,16 +141,18 @@ def add_arguments(parser):
                             "between [-this, this]."))
 
   # Data
-  parser.add_argument("--style_A", type=str, default=None,
-                      help="Style A suffix, e.g., male.")
-  parser.add_argument("--style_B", type=str, default=None,
-                      help="Style B suffix, e.g., female.")
+  parser.add_argument("--text", type=str, default=None,
+                      help="Text suffix, e.g., txt.")
+  parser.add_argument("--attributes", type=str, default=None,
+                      help="Attributes suffix, e.g., attr.")
   parser.add_argument("--train_prefix", type=str, default=None,
                       help="Train prefix, expect files with src/tgt suffixes.")
   parser.add_argument("--dev_prefix", type=str, default=None,
                       help="Dev prefix, expect files with src/tgt suffixes.")
   parser.add_argument("--test_prefix", type=str, default=None,
                       help="Test prefix, expect files with src/tgt suffixes.")
+  parser.add_argument("--metadata", type=str, default=None,
+                      help="Style attributes metadata json filename.")
   parser.add_argument("--out_dir", type=str, default=None,
                       help="Store log/model files.")
 
@@ -306,11 +309,12 @@ def create_hparams(flags):
   """Create training hparams."""
   return tf.contrib.training.HParams(
       # Data
-      style_A=flags.style_A,
-      style_B=flags.style_B,
+      text=flags.text,
+      attributes=flags.attributes,
       train_prefix=flags.train_prefix,
       dev_prefix=flags.dev_prefix,
       test_prefix=flags.test_prefix,
+      metadata_filename=flags.metadata,
       vocab_filename=flags.vocab_filename,
       embed_filename=flags.embed_filename,
       out_dir=flags.out_dir,
@@ -479,6 +483,18 @@ def extend_hparams(hparams):
 
   _add_argument(hparams, "vocab_size", vocab_size)
   _add_argument(hparams, "vocab_file", vocab_file)
+
+  ## Style
+  # Load style metadata
+  style_metadata=json.load(open(hparams.metadata_filename, 'r'))
+
+  # Get number of styles
+  num_styles = 0 # list of all the styles as strings
+  for attribute_dict in style_metadata['attributes']:
+    num_styles += len(attribute_dict[list(attribute_dict.keys())[0]])
+    
+  _add_argument(hparams, "style_metadata", style_metadata)
+  _add_argument(hparams, "num_styles", num_styles)
 
   # Num embedding partitions
   num_embeddings_partitions = getattr(hparams, "num_embeddings_partitions", 0)

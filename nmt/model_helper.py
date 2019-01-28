@@ -29,6 +29,7 @@ from tensorflow.python.ops import lookup_ops
 from .utils import iterator_utils
 from .utils import misc_utils as utils
 from .utils import vocab_utils
+from .utils import style_utils
 
 __all__ = [
     "get_initializer", "get_device_str", "create_train_model",
@@ -82,23 +83,31 @@ def create_train_model(
     model_creator, hparams, scope=None, num_workers=1, jobid=0,
     extra_args=None):
   """Create train graph, model, and iterator."""
-  style_A_file = "%s.%s" % (hparams.train_prefix, hparams.style_A)
-  style_B_file = "%s.%s" % (hparams.train_prefix, hparams.style_B)
+  text_file = "%s.%s" % (hparams.train_prefix, hparams.text)
+  attributes_file = "%s.%s" % (hparams.train_prefix, hparams.attributes)
   vocab_file = hparams.vocab_file
+  style_metadata = hparams.style_metadata
 
   graph = tf.Graph()
 
   with graph.as_default(), tf.container(scope or "train"):
     vocab_table = vocab_utils.create_vocab_table(vocab_file)
+    style_table = style_utils.create_style_table(style_metadata)
 
-    style_A_dataset = tf.data.TextLineDataset(tf.gfile.Glob(style_A_file))
-    style_B_dataset = tf.data.TextLineDataset(tf.gfile.Glob(style_B_file))
+    text_dataset = tf.data.TextLineDataset(text_file)
+    
+    record_defaults = [tf.string] * len(hparams.style_metadata['attributes'])
+    attributes_dataset = tf.data.experimental.CsvDataset(attributes_file,
+                                                         record_defaults)
+
     skip_count_placeholder = tf.placeholder(shape=(), dtype=tf.int64)
 
     iterator = iterator_utils.get_style_iterator(
-        style_A_dataset,
-        style_B_dataset,
+        hparams,
+        text_dataset,
+        attributes_dataset,
         vocab_table,
+        style_table,
         batch_size=hparams.batch_size,
         sos=hparams.sos,
         eos=hparams.eos,
@@ -132,14 +141,16 @@ def create_train_model(
 
 class EvalModel(
     collections.namedtuple("EvalModel",
-                           ("graph", "model", "style_A_file_placeholder",
-                            "style_B_file_placeholder", "iterator"))):
+                           ("graph", "model", "text_file_placeholder",
+                            "attributes_file_placeholder", "iterator"))):
   pass
 
 
 def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
   """Create train graph, model, src/tgt file holders, and iterator."""
   vocab_file = hparams.vocab_file
+  style_metadata = hparams.style_metadata
+
   graph = tf.Graph()
 
   with graph.as_default(), tf.container(scope or "eval"):
@@ -147,16 +158,24 @@ def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
     reverse_vocab_table = lookup_ops.index_to_string_table_from_file(
         vocab_file, default_value=vocab_utils.UNK)
 
-    style_A_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
-    style_B_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
+    style_table = style_utils.create_style_table(style_metadata)
 
-    style_A_dataset = tf.data.TextLineDataset(style_A_file_placeholder)
-    style_B_dataset = tf.data.TextLineDataset(style_B_file_placeholder)
+    text_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
+    attributes_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
+
+    text_dataset = tf.data.TextLineDataset(text_file_placeholder)
+    
+    record_defaults = [tf.string] * len(hparams.style_metadata['attributes'])
+    attributes_dataset = tf.data.experimental.CsvDataset(
+        attributes_file_placeholder,
+        record_defaults)
 
     iterator = iterator_utils.get_style_iterator(
-        style_A_dataset,
-        style_B_dataset,
+        hparams,
+        text_dataset,
+        attributes_dataset,
         vocab_table,
+        style_table,
         batch_size=hparams.batch_size,
         sos=hparams.sos,
         eos=hparams.eos,
@@ -177,15 +196,15 @@ def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
   return EvalModel(
       graph=graph,
       model=model,
-      style_A_file_placeholder=style_A_file_placeholder,
-      style_B_file_placeholder=style_B_file_placeholder,
+      text_file_placeholder=text_file_placeholder,
+      attributes_file_placeholder=attributes_file_placeholder,
       iterator=iterator)
 
 
 class InferModel(
     collections.namedtuple("InferModel",
-                           ("graph", "model", "style_A_placeholder",
-                            "style_B_placeholder", "batch_size_placeholder",
+                           ("graph", "model", "text_file_placeholder",
+                            "attributes_file_placeholder", "batch_size_placeholder",
                             "iterator"))):
   pass
 
@@ -195,25 +214,32 @@ def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
 
   graph = tf.Graph()
   vocab_file = hparams.vocab_file
+  style_metadata = hparams.style_metadata
 
   with graph.as_default(), tf.container(scope or "infer"):
     vocab_table = vocab_utils.create_vocab_table(vocab_file)
     reverse_vocab_table = lookup_ops.index_to_string_table_from_file(
         vocab_file, default_value=vocab_utils.UNK)
 
-    style_A_placeholder = tf.placeholder(shape=[None], dtype=tf.string)
-    style_B_placeholder = tf.placeholder(shape=[None], dtype=tf.string)
+    style_table = style_utils.create_style_table(style_metadata)
+
+    text_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
+    attributes_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
     batch_size_placeholder = tf.placeholder(shape=[], dtype=tf.int64)
 
-    style_A_dataset = tf.data.Dataset.from_tensor_slices(
-        style_A_placeholder)
-    style_B_dataset = tf.data.Dataset.from_tensor_slices(
-        style_B_placeholder)
+    text_dataset = tf.data.TextLineDataset(text_file_placeholder)
+    
+    record_defaults = [tf.string] * len(hparams.style_metadata['attributes'])
+    attributes_dataset = tf.data.experimental.CsvDataset(
+        attributes_file_placeholder,
+        record_defaults)
 
     iterator = iterator_utils.get_style_infer_iterator(
-        style_A_dataset,
-        style_B_dataset,
+        hparams,
+        text_dataset,
+        attributes_dataset,
         vocab_table,
+        style_table,
         batch_size=batch_size_placeholder,
         eos=hparams.eos,
         max_len=hparams.max_len_infer,
@@ -232,8 +258,8 @@ def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
   return InferModel(
       graph=graph,
       model=model,
-      style_A_placeholder=style_A_placeholder,
-      style_B_placeholder=style_B_placeholder,
+      text_file_placeholder=text_file_placeholder,
+      attributes_file_placeholder=attributes_file_placeholder,
       batch_size_placeholder=batch_size_placeholder,
       iterator=iterator)
 
@@ -349,9 +375,36 @@ def create_emb_for_encoder_and_decoder(vocab_size,
   return embedding
 
 
+#def create_style_table_and_embedding(style_metadata,
+#                                     embed_size,
+#                                     dtype=tf.float32,
+#                                     scope=None):
+#  with tf.variable_scope(scope or "style_embeddings", dtype=dtype) as scope:
+#    ## Create table
+#    styles = [] # list of all the styles as strings
+#    for attribute_dict in style_metadata['attributes']:
+#      styles += attribute_dict[list(attribute_dict.keys())[0]]
+#
+#    mapping_strings = tf.constant(styles)
+#    style_table = tf.contrib.lookup.index_table_from_tensor(
+#        mapping=mapping_strings, num_oov_buckets=0, default_value=-1)
+#    
+#    ### To query table:
+#    #sample_attr = tf.constant(['positive', 'male', 'asian'])
+#    #ids = style_table.lookup(sample_attr)
+#
+#    ## Create embedding
+#    style_embedding = tf.get_variable("style_embeddings",
+#        [len(styles), embed_size])
+#
+#    ### To query style embeddings
+#    #embedded_style_ids = tf.nn.embedding_lookup(style_embedding, style_ids)
+#
+#  return style_table, style_embedding
+
+
 def _single_cell(unit_type, num_units, forget_bias, dropout, mode,
-                 residual_connection=False, device_str=None, residual_fn=None,
-                 reuse=False):
+                 residual_connection=False, device_str=None, residual_fn=None):
   """Create an instance of a single RNN cell."""
   # dropout (= 1 - keep_prob) is set to 0 during eval and infer
   dropout = dropout if mode == tf.contrib.learn.ModeKeys.TRAIN else 0.0
@@ -361,23 +414,20 @@ def _single_cell(unit_type, num_units, forget_bias, dropout, mode,
     utils.print_out("  LSTM, forget_bias=%g" % forget_bias, new_line=False)
     single_cell = tf.contrib.rnn.BasicLSTMCell(
         num_units,
-        forget_bias=forget_bias,
-        reuse=reuse)
+        forget_bias=forget_bias)
   elif unit_type == "gru":
     utils.print_out("  GRU", new_line=False)
-    single_cell = tf.contrib.rnn.GRUCell(num_units, reuse=reuse)
+    single_cell = tf.contrib.rnn.GRUCell(num_units)
   elif unit_type == "layer_norm_lstm":
     utils.print_out("  Layer Normalized LSTM, forget_bias=%g" % forget_bias,
-                    new_line=False,
-                    reuse=reuse)
+                    new_line=False)
     single_cell = tf.contrib.rnn.LayerNormBasicLSTMCell(
         num_units,
         forget_bias=forget_bias,
-        layer_norm=True,
-        reuse=reuse)
+        layer_norm=True)
   elif unit_type == "nas":
     utils.print_out("  NASCell", new_line=False)
-    single_cell = tf.contrib.rnn.NASCell(num_units, reuse=reuse)
+    single_cell = tf.contrib.rnn.NASCell(num_units)
   else:
     raise ValueError("Unknown unit type %s!" % unit_type)
 
@@ -405,7 +455,7 @@ def _single_cell(unit_type, num_units, forget_bias, dropout, mode,
 
 def _cell_list(unit_type, num_units, num_layers, num_residual_layers,
                forget_bias, dropout, mode, num_gpus, base_gpu=0,
-               single_cell_fn=None, residual_fn=None, reuse=False):
+               single_cell_fn=None, residual_fn=None):
   """Create a list of RNN cells."""
   if not single_cell_fn:
     single_cell_fn = _single_cell
@@ -422,9 +472,7 @@ def _cell_list(unit_type, num_units, num_layers, num_residual_layers,
         mode=mode,
         residual_connection=(i >= num_layers - num_residual_layers),
         device_str=get_device_str(i + base_gpu, num_gpus),
-        residual_fn=residual_fn,
-        reuse=reuse
-    )
+        residual_fn=residual_fn)
     utils.print_out("")
     cell_list.append(single_cell)
 
@@ -433,7 +481,7 @@ def _cell_list(unit_type, num_units, num_layers, num_residual_layers,
 
 def create_rnn_cell(unit_type, num_units, num_layers, num_residual_layers,
                     forget_bias, dropout, mode, num_gpus, base_gpu=0,
-                    single_cell_fn=None, reuse=False):
+                    single_cell_fn=None):
   """Create multi-layer RNN cell.
 
   Args:
@@ -466,8 +514,7 @@ def create_rnn_cell(unit_type, num_units, num_layers, num_residual_layers,
                          mode=mode,
                          num_gpus=num_gpus,
                          base_gpu=base_gpu,
-                         single_cell_fn=single_cell_fn,
-                         reuse=reuse)
+                         single_cell_fn=single_cell_fn,)
 
   if len(cell_list) == 1:  # Single layer.
     return cell_list[0]

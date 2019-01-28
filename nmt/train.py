@@ -31,6 +31,7 @@ from . import model as nmt_model
 from . import model_helper
 from .utils import misc_utils as utils
 from .utils import nmt_utils
+from .utils import vocab_utils
 
 utils.check_tensorflow_version()
 
@@ -468,11 +469,11 @@ def train(hparams, scope=None, target_session=""):
   eval_model = model_helper.create_eval_model(model_creator, hparams, scope)
   infer_model = model_helper.create_infer_model(model_creator, hparams, scope)
 
-  # Preload data for sample decoding.
-  dev_style_A_file = "%s.%s" % (hparams.dev_prefix, hparams.style_A)
-  dev_style_B_file = "%s.%s" % (hparams.dev_prefix, hparams.style_B)
-  sample_style_A_data = inference.load_data(dev_style_A_file)
-  sample_style_B_data = inference.load_data(dev_style_B_file)
+  ## Preload data for sample decoding.
+  #dev_style_A_file = "%s.%s" % (hparams.dev_prefix, hparams.style_A)
+  #dev_style_B_file = "%s.%s" % (hparams.dev_prefix, hparams.style_B)
+  #sample_style_A_data = inference.load_data(dev_style_A_file)
+  #sample_style_B_data = inference.load_data(dev_style_B_file)
 
   summary_name = "train_log"
   model_dir = hparams.out_dir
@@ -507,7 +508,18 @@ def train(hparams, scope=None, target_session=""):
       train_model.iterator.initializer,
       feed_dict={train_model.skip_count_placeholder: 0})
 
-  #print(train_sess.run(train_model.model.transferred_sequence_length))
+  #style_labels, tgt_in, style_emb_inp, full_emb_inp = \
+  #    train_sess.run([train_model.model.style_labels,
+  #                    train_model.model.target_input,
+  #                    train_model.model.style_emb_inp,
+  #                    train_model.model.decoder_emb_inp_mod])
+  #print("style_labels:\n", style_labels.shape)
+  #print("target_in:\n", tgt_in.shape)
+  #print("style_emb_inp:\n", style_emb_inp.shape)
+  #print("full_emb_inp:\n", full_emb_inp.shape)
+
+  #print("batch_size: ", hparams.batch_size)
+  #print("embed_size: ", hparams.num_units)
 
   print("Just before first evaluation!")
   exit()
