@@ -133,6 +133,12 @@ def add_arguments(parser):
                       help=("Whether try colocating gradients with "
                             "corresponding op"))
 
+  # Loss
+  parser.add_argument("--lambda_ae", type=float, default=1.0,
+                      help="Weight of autoencoder loss in total loss.")
+  parser.add_argument("--lambda_bt", type=float, default=1.0,
+                      help="Weight of back-translation loss in total loss.")
+
   # Initializer
   parser.add_argument("--init_op", type=str, default="uniform",
                       help="uniform | glorot_normal | glorot_uniform")
@@ -349,6 +355,8 @@ def create_hparams(flags):
       decay_scheme=flags.decay_scheme,
       colocate_gradients_with_ops=flags.colocate_gradients_with_ops,
       num_sampled_softmax=flags.num_sampled_softmax,
+      lambda_ae=flags.lambda_ae,
+      lambda_bt=flags.lambda_bt,
 
       # Data constraints
       num_buckets=flags.num_buckets,

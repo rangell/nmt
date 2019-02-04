@@ -158,6 +158,10 @@ class BaseModel(object):
     # Global step
     self.global_step = tf.Variable(0, trainable=False)
 
+    # Loss weighting
+    self.lambda_ae = tf.Variable(hparams.lambda_ae, trainable=False)
+    self.lambda_bt = tf.Variable(hparams.lambda_bt, trainable=False)
+
     # Initializer
     self.random_seed = hparams.random_seed
     initializer = model_helper.get_initializer(
@@ -474,12 +478,16 @@ class BaseModel(object):
               encoder_outputs, encoder_state, sequence_length,
               target_style_labels, back_trans=False)
 
+
       ## Loss
       if self.mode != tf.contrib.learn.ModeKeys.INFER:
         (logits, sample_id, final_context_state) = None, None, None
         with tf.device(model_helper.get_device_str(self.num_encoder_layers - 1,
                                                    self.num_gpus)):
-          loss = self._compute_loss(ae_logits, ae_decoder_cell_outputs)
+          ae_loss = self._compute_loss(ae_logits, ae_decoder_cell_outputs)
+          bt_loss = self._compute_loss(bt_logits, bt_decoder_cell_outputs)
+
+          loss = (self.lambda_ae * ae_loss) + (self.lambda_bt * bt_loss)
       else:
         loss = tf.constant(0.0)
 
@@ -728,12 +736,8 @@ class BaseModel(object):
 
         self.infer_mode = infer_mode
         
-        #if back_trans and tf.to_float(self.global_step) == 0.0:
-        #  infer_mode = "greedy"
-
         style_emb_inp = tf.reduce_mean(tf.nn.embedding_lookup(
             self.style_embedding, style_labels), axis=1)
-
 
         start_tokens=tf.fill([self.batch_size], tgt_sos_id)
         end_token = tgt_eos_id
@@ -762,29 +766,20 @@ class BaseModel(object):
         elif infer_mode == "sample":
           # Helper
           sampling_temperature = tf.constant(hparams.sampling_temperature)
-          sampling_temperature = tf.constant(0.1)
-          # assert sampling_temperature > 0.0
-          ### TODO: fix the sampling_temperature schedule
+          sampling_temperature = (tf.cast(self.global_step, tf.float32)
+                                  * sampling_temperature
+                                  / hparams.num_train_steps)
+          sampling_temperature = tf.cast(sampling_temperature, tf.float32)
 
-          #helper = tf.contrib.seq2seq.SampleEmbeddingHelper(
-          #    self.embedding, start_tokens, end_token,
-          #    softmax_temperature=sampling_temperature,
-          #    seed=self.random_seed)
           helper = inference_helpers.SampleInferenceHelper(
               self.embedding, style_emb_inp, end_token,
               softmax_temperature=sampling_temperature,
               seed=self.random_seed)
         elif infer_mode == "greedy":
-          #helper = tf.contrib.seq2seq.GreedyEmbeddingHelper(
-          #    self.embedding, start_tokens, end_token)
           helper = inference_helpers.GreedyInferenceHelper(
               self.embedding, style_emb_inp, end_token)
         else:
           raise ValueError("Unknown infer_mode '%s'", infer_mode)
-
-        ## HACK TO INJECT STYLE EMBEDDING ##
-        #helper._start_inputs = style_emb_inp
-        ####################################
 
         if infer_mode != "beam_search":
           my_decoder = tf.contrib.seq2seq.BasicDecoder(

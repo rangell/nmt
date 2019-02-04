@@ -503,26 +503,7 @@ def train(hparams, scope=None, target_session=""):
   summary_writer = tf.summary.FileWriter(
       os.path.join(out_dir, summary_name), train_model.graph)
 
-  # Test style embedding input
-  train_sess.run(
-      train_model.iterator.initializer,
-      feed_dict={train_model.skip_count_placeholder: 0})
-
-  style_emb_inp, start_embeds, sampled_pseudo_sequence = \
-      train_sess.run([train_model.model.style_emb_inp,
-                      train_model.model.start_embeds,
-                      train_model.model.sampled_pseudo_sequence])
-
-  print("style_emb_inp:\n", style_emb_inp)
-  print("style_emb_inp shape:", style_emb_inp.shape)
-  print("start_embeds:\n", start_embeds)
-  print("start_embeds shape:", start_embeds.shape)
-  print("sampled_pseudo_sequence:\n", sampled_pseudo_sequence)
-  print("sampled_pseudo_sequence shape:", sampled_pseudo_sequence.shape)
-  print("train_model infer_mode: ", train_model.model.infer_mode)
-
-  print("Just before first evaluation!")
-  exit()
+  assert False
 
   # First evaluation
   run_full_eval(
@@ -530,6 +511,9 @@ def train(hparams, scope=None, target_session=""):
       eval_model, eval_sess, hparams,
       summary_writer, sample_src_data,
       sample_tgt_data, avg_ckpts)
+
+  print("Got here!")
+  exit()
 
   last_stats_step = global_step
   last_eval_step = global_step
