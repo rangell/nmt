@@ -508,18 +508,18 @@ def train(hparams, scope=None, target_session=""):
       train_model.iterator.initializer,
       feed_dict={train_model.skip_count_placeholder: 0})
 
-  #style_labels, tgt_in, style_emb_inp, full_emb_inp = \
-  #    train_sess.run([train_model.model.style_labels,
-  #                    train_model.model.target_input,
-  #                    train_model.model.style_emb_inp,
-  #                    train_model.model.decoder_emb_inp_mod])
-  #print("style_labels:\n", style_labels.shape)
-  #print("target_in:\n", tgt_in.shape)
-  #print("style_emb_inp:\n", style_emb_inp.shape)
-  #print("full_emb_inp:\n", full_emb_inp.shape)
+  style_emb_inp, start_embeds, sampled_pseudo_sequence = \
+      train_sess.run([train_model.model.style_emb_inp,
+                      train_model.model.start_embeds,
+                      train_model.model.sampled_pseudo_sequence])
 
-  #print("batch_size: ", hparams.batch_size)
-  #print("embed_size: ", hparams.num_units)
+  print("style_emb_inp:\n", style_emb_inp)
+  print("style_emb_inp shape:", style_emb_inp.shape)
+  print("start_embeds:\n", start_embeds)
+  print("start_embeds shape:", start_embeds.shape)
+  print("sampled_pseudo_sequence:\n", sampled_pseudo_sequence)
+  print("sampled_pseudo_sequence shape:", sampled_pseudo_sequence.shape)
+  print("train_model infer_mode: ", train_model.model.infer_mode)
 
   print("Just before first evaluation!")
   exit()

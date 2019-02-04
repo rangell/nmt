@@ -20,7 +20,9 @@ from __future__ import print_function
 
 import abc
 import collections
+from functools import reduce
 import numpy as np
+from operator import mul
 
 from IPython import embed
 import tensorflow as tf
@@ -30,6 +32,7 @@ from .utils import iterator_utils
 from .utils import misc_utils as utils
 from .utils import vocab_utils
 from .utils import style_utils
+from .utils import inference_helpers
 
 utils.check_tensorflow_version()
 
@@ -169,12 +172,15 @@ class BaseModel(object):
     self.init_embeddings(hparams, scope)
 
     # Style Table
-    self.style_table = style_utils.create_style_table(hparams.style_metadata)
+    self.style_metadata = hparams.style_metadata
+    self.style_table = style_utils.create_style_table(self.style_metadata)
 
     # Style Embeddings
     self.style_embedding = style_utils.create_style_embedding(
         num_styles=self.num_styles, embed_size=self.num_units)
 
+    # Initialize variables for sampling
+    self._init_style_sampling_variables()
 
   def _set_train_or_infer(self, res, reverse_vocab_table, hparams):
     """Set up training and inference."""
@@ -318,6 +324,26 @@ class BaseModel(object):
             use_char_encode=hparams.use_char_encode,
             scope=scope,)
 
+  def _init_style_sampling_variables(self):
+    ## Get num of the possible styles for each attribute
+    self.modulo_constants = [] # list of all the styles as strings
+    for attribute_dict in self.style_metadata['attributes']:
+      self.modulo_constants.append(len(attribute_dict[
+                                            list(attribute_dict.keys())[0]]))
+
+    # total number of unique styles
+    self.num_attributes = len(self.modulo_constants)
+    self.num_uniq_styles = reduce(mul, self.modulo_constants, 1)
+
+    # start indices for each attribute
+    self.start_indices = [sum(self.modulo_constants[:i]) \
+                                      for i in range(self.num_attributes)]
+
+    # integer divisors for conversion to integer representation (as tensor)
+    self.integer_divisors = [reduce(mul, self.modulo_constants[:i], 1) \
+                                      for i in range(self.num_attributes)]
+
+
   def _get_train_summary(self):
     """Get train summary."""
     train_summary = tf.summary.merge(
@@ -382,6 +408,7 @@ class BaseModel(object):
       if hparams.language_model:
         return self._build_language_model(hparams)
 
+
       assert not self.extract_encoder_layers
 
       sequence = self.iterator.source
@@ -390,59 +417,73 @@ class BaseModel(object):
 
       self.style_labels = style_labels
 
-      ## Auto-encode 
-      noisy_sequence = self._noise_sequence(sequence)
+      #### TODO: build different graph for inference
+      target_style_labels = self._sample_style_labels(style_labels)
 
-      self.encoder_outputs, encoder_state = self._build_encoder(hparams,
-          noisy_sequence, sequence_length)
+      # Train or eval
+      if self.mode != tf.contrib.learn.ModeKeys.INFER:
+        ## Auto-encode 
+        noisy_sequence = self._noise_sequence(sequence)
 
-      ### NOTE: Pass style_labels to decoder, so we can pass averaged
-      ### style embeddings as <SOS> to decoder
-      (ae_logits, ae_decoder_cell_outputs, 
-       ae_sample_id, ae_final_context_state) = (self._build_decoder(hparams,
-         self.encoder_outputs, encoder_state, sequence_length, style_labels))
+        encoder_outputs, encoder_state = self._build_encoder(hparams,
+            noisy_sequence, sequence_length)
 
-      ### Back-translate
+        (ae_logits, ae_decoder_cell_outputs, 
+         ae_sample_id, ae_final_context_state) = (self._build_decoder(hparams,
+           encoder_outputs, encoder_state, sequence_length, style_labels))
 
-      ### Transfer decode
-      #logits, _, _, _ = (
-      #        self._build_decoder(hparams, self.encoder_outputs, encoder_state,
-      #                            sequence_length))
+        ## Back-translate
+        encoder_outputs, encoder_state = self._build_encoder(hparams,
+            sequence, sequence_length)
 
-      ## Get transferred sequence
-      #transferred_sequence = tf.transpose(tf.argmax(logits, axis=2))
-      #transferred_sequence_length = tf.fill(tf.shape(sequence_length),
-      #                                      tf.shape(transferred_sequence)[1])
+        _, _, sample_id, self.final_context_state = \
+            self._build_decoder(hparams, encoder_outputs,
+            encoder_state, sequence_length, target_style_labels,
+            back_trans=True)
 
-      ## Stop gradient from back-propagating all the way through
-      #transferred_sequence = tf.stop_gradient(transferred_sequence)
-      #
-      ## Create initial state for back-translating encoder
-      #init_state = self._init_style_state(hparams, switch_style=True,
-      #                                    prev_state=None)
+        sampled_pseudo_sequence = sample_id
 
-      ### Encode transferred sequence
-      #tsf_encoder_outputs, tsf_encoder_state = self._build_encoder(
-      #    hparams, transferred_sequence, transferred_sequence_length)
+        # transpose it back to batch major if time major.
+        # encoder will automatically transpose it back if time_major
+        if self.time_major:
+          sampled_pseudo_sequence = tf.transpose(sampled_pseudo_sequence)
 
-      ### Create initial state for back-translating decoder
-      ##init_state = self._init_style_state(hparams, switch_style=False,
-      ##                                    prev_state=tsf_encoder_state)
+        ## Stop gradient from back-propagating all the way through
+        tf.stop_gradient(sampled_pseudo_sequence)
 
-      ### Back-translate decode
-      #(bt_logits, bt_decoder_cell_outputs, 
-      # bt_sample_id, bt_final_context_state) = (self._build_decoder(hparams,
-      #   tsf_encoder_outputs, tsf_encoder_state, transferred_sequence_length))
+        ## Get sampled pseudo sequence's length
+        sampled_seq_length = tf.fill([tf.shape(sampled_pseudo_sequence)[0]],
+                                      tf.shape(sampled_pseudo_sequence)[1])
+
+        self.sampled_pseudo_sequence = sampled_pseudo_sequence
+
+        encoder_outputs, encoder_state = self._build_encoder(hparams,
+            sampled_pseudo_sequence, sampled_seq_length)
+
+        (bt_logits, bt_decoder_cell_outputs, 
+         bt_sample_id, bt_final_context_state) = (self._build_decoder(hparams,
+           encoder_outputs, encoder_state, sampled_seq_length, style_labels))
+
+      # Inference
+      else:
+        encoder_outputs, encoder_state = self._build_encoder(hparams,
+            sequence, sequence_length)
+
+        (logits, decoder_cell_outputs, 
+          sample_id, final_context_state) = self._build_decoder(hparams,
+              encoder_outputs, encoder_state, sequence_length,
+              target_style_labels, back_trans=False)
 
       ## Loss
       if self.mode != tf.contrib.learn.ModeKeys.INFER:
+        (logits, sample_id, final_context_state) = None, None, None
         with tf.device(model_helper.get_device_str(self.num_encoder_layers - 1,
                                                    self.num_gpus)):
           loss = self._compute_loss(ae_logits, ae_decoder_cell_outputs)
       else:
         loss = tf.constant(0.0)
 
-      return ae_logits, loss, ae_final_context_state, ae_sample_id
+      return logits, loss, final_context_state, sample_id
 
   def _build_language_model(self, hparams):
     ## TODO: make this work for style -- this is currently wrong
@@ -505,12 +546,42 @@ class BaseModel(object):
 
     noisy_sequence = tf.gather_nd(noisy_sequence, indices)
 
-    self.sigma = sigma
-    self.batch_index = batch_index
-    self.indices = indices
-    self.noisy_sequence = noisy_sequence
-
     return noisy_sequence
+
+  def _sample_style_labels(self, current_style_labels):
+    # convert modulo_constants, start_indices, and integer_divisors to tensors
+    modulo_constants = tf.broadcast_to(tf.constant(self.modulo_constants),
+                                           tf.shape(current_style_labels))
+    start_indices = tf.broadcast_to(tf.constant(self.start_indices),
+                                       tf.shape(current_style_labels))
+    integer_divisors = tf.broadcast_to(tf.constant(self.integer_divisors),
+                                       tf.shape(current_style_labels))
+
+    ## STEP 1: Convert all sets of style labels to integer representation
+    #inv_rep = lambda r : sum([r*d for r, d in zip(r, integer_divisors)])
+    _current_style_labels = current_style_labels - start_indices
+    int_style_rep = tf.reduce_sum(tf.multiply(_current_style_labels,
+                                              self.integer_divisors), axis=1)
+
+    ## STEP 2: Generate a random number in [1...(num_uniq_styles-1)] for each
+    ##          example in batch
+    rand_ints = tf.random.uniform(tf.shape(int_style_rep), minval=1,
+                                maxval=self.num_uniq_styles-1, dtype=tf.int32)
+
+    ## STEP 3: (STEP 1 + STEP 2) % num_uniq_styles
+    new_int_reps = tf.expand_dims(tf.floormod(tf.add(int_style_rep, rand_ints),
+                                  tf.constant(self.num_uniq_styles)), axis=1)
+
+
+    ## STEP 4: Convert STEP 3 batch to style label represenation
+    #rep = lambda x : [(x // d) % m for d, m in zip(integer_divisors, modulo_constants)]
+    sampled_style_labels = tf.floormod(tf.floordiv(new_int_reps,
+                                          integer_divisors), modulo_constants)
+
+    sampled_style_labels = sampled_style_labels + start_indices
+
+    return sampled_style_labels
+
 
   def _build_encoder_cell(self, hparams, num_layers, num_residual_layers,
                           base_gpu=0):
@@ -542,7 +613,7 @@ class BaseModel(object):
     return maximum_iterations
 
   def _build_decoder(self, hparams, encoder_outputs, init_state,
-                     sequence_length, style_labels):
+                     sequence_length, style_labels, back_trans=False):
     """Build and run a RNN decoder with a final projection layer.
 
     Args:
@@ -576,22 +647,34 @@ class BaseModel(object):
       logits = tf.no_op()
       decoder_cell_outputs = None
 
+      ## NOTE: `back_trans=True` means we're performing inference for the
+      ##         purposes of back-translation.
+
       ## Train or eval
-      if self.mode != tf.contrib.learn.ModeKeys.INFER:
-        # decoder_emp_inp: [max_time, batch_size, num_units]
+      if self.mode != tf.contrib.learn.ModeKeys.INFER and not back_trans:
         target_input = iterator.target_input
+        time_axis = 1
+
         if self.time_major:
+          # decoder_emp_inp: [max_time, batch_size, num_units]
           target_input = tf.transpose(target_input)
+          time_axis = 0
+
         decoder_emb_inp = tf.nn.embedding_lookup(
             self.embedding, target_input)
 
         # Pass style embedding as <SOS> to decoder
         style_emb_inp = tf.reduce_mean(tf.nn.embedding_lookup(
             self.style_embedding, style_labels), axis=1)
-        style_emb_inp = tf.expand_dims(style_emb_inp, axis=0)
-
-        decoder_emb_inp_mod = tf.concat([style_emb_inp,
-                                         decoder_emb_inp[1:,:,:]], axis=0)
+        style_emb_inp = tf.expand_dims(style_emb_inp, axis=time_axis)
+        if self.time_major:
+          decoder_emb_inp_mod = tf.concat([style_emb_inp,
+                                           decoder_emb_inp[1:,:,:]],
+                                          axis=time_axis)
+        else:
+          decoder_emb_inp_mod = tf.concat([style_emb_inp,
+                                           decoder_emb_inp[:,1:,:]],
+                                          axis=time_axis)
 
         # Helper
         helper = tf.contrib.seq2seq.TrainingHelper(
@@ -636,9 +719,28 @@ class BaseModel(object):
 
       ## Inference
       else:
-        infer_mode = hparams.infer_mode
-        start_tokens = tf.fill([self.batch_size], tgt_sos_id)
+
+        ### NOTE: Somehow have to get infer_mode to work with global_step and
+        ###        back_trans
+
+        #infer_mode = "sample" if back_trans else hparams.infer_mode
+        infer_mode = "greedy"
+
+        self.infer_mode = infer_mode
+        
+        #if back_trans and tf.to_float(self.global_step) == 0.0:
+        #  infer_mode = "greedy"
+
+        style_emb_inp = tf.reduce_mean(tf.nn.embedding_lookup(
+            self.style_embedding, style_labels), axis=1)
+
+
+        start_tokens=tf.fill([self.batch_size], tgt_sos_id)
         end_token = tgt_eos_id
+
+        self.style_emb_inp = style_emb_inp
+        self.start_embeds = tf.nn.embedding_lookup(self.embedding, start_tokens)
+
         utils.print_out(
             "  decoder: infer_mode=%sbeam_width=%d, length_penalty=%f" % (
                 infer_mode, hparams.beam_width, hparams.length_penalty_weight))
@@ -647,6 +749,7 @@ class BaseModel(object):
           beam_width = hparams.beam_width
           length_penalty_weight = hparams.length_penalty_weight
 
+          assert False
           my_decoder = tf.contrib.seq2seq.BeamSearchDecoder(
               cell=cell,
               embedding=self.embedding,
@@ -658,19 +761,24 @@ class BaseModel(object):
               length_penalty_weight=length_penalty_weight)
         elif infer_mode == "sample":
           # Helper
-          sampling_temperature = hparams.sampling_temperature
-          assert sampling_temperature > 0.0, (
-              "sampling_temperature must greater than 0.0 when using sample"
-              " decoder.")
+          sampling_temperature = tf.constant(hparams.sampling_temperature)
+          # assert sampling_temperature > 0.0
+          ### TODO: fix the sampling_temperature schedule
           helper = tf.contrib.seq2seq.SampleEmbeddingHelper(
               self.embedding, start_tokens, end_token,
               softmax_temperature=sampling_temperature,
               seed=self.random_seed)
         elif infer_mode == "greedy":
-          helper = tf.contrib.seq2seq.GreedyEmbeddingHelper(
-              self.embedding, start_tokens, end_token)
+          #helper = tf.contrib.seq2seq.GreedyEmbeddingHelper(
+          #    self.embedding, start_tokens, end_token)
+          helper = inference_helpers.GreedyInferenceHelper(
+              self.embedding, style_emb_inp, end_token)
         else:
           raise ValueError("Unknown infer_mode '%s'", infer_mode)
+
+        ## HACK TO INJECT STYLE EMBEDDING ##
+        #helper._start_inputs = style_emb_inp
+        ####################################
 
         if infer_mode != "beam_search":
           my_decoder = tf.contrib.seq2seq.BasicDecoder(
