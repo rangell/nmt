@@ -121,10 +121,10 @@ def get_style_infer_iterator(hparams,
   ### Build the joint style dataset
   joint_dataset = tf.data.Dataset.zip((text_dataset, attributes_dataset))
 
-  # Tokenize sentences
+  # Tokenize sentences and labels
   joint_dataset = joint_dataset.map(
       lambda sent, labels: (
-          tf.string_split([sent]).values, labels),
+          tf.string_split([sent]).values, tf.string_split([labels]).values),
       num_parallel_calls=num_parallel_calls)
 
   # Filter zero length input sequences.
@@ -140,9 +140,9 @@ def get_style_infer_iterator(hparams,
   joint_dataset = joint_dataset.map(
     lambda sent, labels: (tf.cast(vocab_table.lookup(sent), tf.int32), labels))
 
-  # Cast the tuple of style strings to a tensor
-  joint_dataset = joint_dataset.map(
-    lambda sent, labels: (sent, tf.convert_to_tensor(labels)))
+  ## Cast the tuple of style strings to a tensor
+  #joint_dataset = joint_dataset.map(
+  #  lambda sent, labels: (sent, tf.convert_to_tensor(labels)))
 
   # Convert style strings to ids
   joint_dataset = joint_dataset.map(

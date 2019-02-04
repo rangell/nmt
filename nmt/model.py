@@ -55,7 +55,7 @@ class EvalOutputTuple(collections.namedtuple(
 
 class InferOutputTuple(collections.namedtuple(
     "InferOutputTuple", ("infer_logits", "infer_summary", "sample_id",
-                         "sample_words"))):
+                         "sample_words", "sample_style"))):
   """To allow for flexibily in returing different outputs."""
   pass
 
@@ -422,7 +422,7 @@ class BaseModel(object):
       self.style_labels = style_labels
 
       #### TODO: build different graph for inference
-      target_style_labels = self._sample_style_labels(style_labels)
+      self.target_style_labels = self._sample_style_labels(style_labels)
 
       # Train or eval
       if self.mode != tf.contrib.learn.ModeKeys.INFER:
@@ -442,7 +442,7 @@ class BaseModel(object):
 
         _, _, sample_id, self.final_context_state = \
             self._build_decoder(hparams, encoder_outputs,
-            encoder_state, sequence_length, target_style_labels,
+            encoder_state, sequence_length, self.target_style_labels,
             back_trans=True)
 
         sampled_pseudo_sequence = sample_id
@@ -476,7 +476,7 @@ class BaseModel(object):
         (logits, decoder_cell_outputs, 
           sample_id, final_context_state) = self._build_decoder(hparams,
               encoder_outputs, encoder_state, sequence_length,
-              target_style_labels, back_trans=False)
+              self.target_style_labels, back_trans=False)
 
 
       ## Loss
@@ -887,7 +887,8 @@ class BaseModel(object):
     output_tuple = InferOutputTuple(infer_logits=self.infer_logits,
                                     infer_summary=self.infer_summary,
                                     sample_id=self.sample_id,
-                                    sample_words=self.sample_words)
+                                    sample_words=self.sample_words,
+                                    sample_style=self.target_style_labels)
     return sess.run(output_tuple)
 
   def decode(self, sess):
@@ -903,6 +904,7 @@ class BaseModel(object):
     output_tuple = self.infer(sess)
     sample_words = output_tuple.sample_words
     infer_summary = output_tuple.infer_summary
+    sample_style = output_tuple.sample_style
 
     # make sure outputs is of shape [batch_size, time] or [beam_width,
     # batch_size, time] when using beam search.
@@ -911,7 +913,7 @@ class BaseModel(object):
     elif sample_words.ndim == 3:
       # beam search output in [batch_size, time, beam_width] shape.
       sample_words = sample_words.transpose([2, 0, 1])
-    return sample_words, infer_summary
+    return sample_words, infer_summary, sample_style
 
   def build_encoder_states(self, include_embeddings=False):
     """Stack encoder states and return tensor [batch, length, layer, size]."""

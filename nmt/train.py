@@ -44,15 +44,16 @@ __all__ = [
 
 
 def run_sample_decode(infer_model, infer_sess, model_dir, hparams,
-                      summary_writer, src_data, tgt_data):
+                      summary_writer, sample_text_data, sample_attr_data):
   """Sample decode a random sentence from src_data."""
   with infer_model.graph.as_default():
     loaded_infer_model, global_step = model_helper.create_or_load_model(
         infer_model.model, model_dir, infer_sess, "infer")
 
   _sample_decode(loaded_infer_model, global_step, infer_sess, hparams,
-                 infer_model.iterator, src_data, tgt_data,
-                 infer_model.src_placeholder,
+                 infer_model.iterator, sample_text_data, sample_attr_data,
+                 infer_model.text_placeholder,
+                 infer_model.attributes_placeholder,
                  infer_model.batch_size_placeholder, summary_writer)
 
 
@@ -317,8 +318,8 @@ def run_full_eval(model_dir,
                   eval_sess,
                   hparams,
                   summary_writer,
-                  sample_src_data,
-                  sample_tgt_data,
+                  sample_text_data,
+                  sample_attr_data,
                   avg_ckpts=False):
   """Wrapper for running sample_decode, internal_eval and external_eval.
 
@@ -330,15 +331,15 @@ def run_full_eval(model_dir,
     eval_sess: Evaluation TensorFlow session.
     hparams: Model hyper-parameters.
     summary_writer: Summary writer for logging metrics to TensorBoard.
-    sample_src_data: sample of source data for sample decoding.
-    sample_tgt_data: sample of target data for sample decoding.
+    sample_text_file: file containing sample of source data.
+    sample_attr_file: file containing sample of source data attributes.
     avg_ckpts: Whether to compute average external evaluation scores.
   Returns:
     Triple containing results summary, global step Tensorflow Variable and
     metrics in this order.
   """
   run_sample_decode(infer_model, infer_sess, model_dir, hparams, summary_writer,
-                    sample_src_data, sample_tgt_data)
+                    sample_text_data, sample_attr_data)
   return run_internal_and_external_eval(model_dir, infer_model, infer_sess,
                                         eval_model, eval_sess, hparams,
                                         summary_writer, avg_ckpts)
@@ -470,10 +471,10 @@ def train(hparams, scope=None, target_session=""):
   infer_model = model_helper.create_infer_model(model_creator, hparams, scope)
 
   ## Preload data for sample decoding.
-  #dev_style_A_file = "%s.%s" % (hparams.dev_prefix, hparams.style_A)
-  #dev_style_B_file = "%s.%s" % (hparams.dev_prefix, hparams.style_B)
-  #sample_style_A_data = inference.load_data(dev_style_A_file)
-  #sample_style_B_data = inference.load_data(dev_style_B_file)
+  dev_text_file = "%s.%s" % (hparams.dev_prefix, hparams.text)
+  dev_attributes_file = "%s.%s" % (hparams.dev_prefix, hparams.attributes)
+  sample_text_data = inference.load_data(dev_text_file)
+  sample_attr_data = inference.load_attributes(dev_attributes_file)
 
   summary_name = "train_log"
   model_dir = hparams.out_dir
@@ -503,16 +504,13 @@ def train(hparams, scope=None, target_session=""):
   summary_writer = tf.summary.FileWriter(
       os.path.join(out_dir, summary_name), train_model.graph)
 
-  assert False
-
   # First evaluation
   run_full_eval(
       model_dir, infer_model, infer_sess,
       eval_model, eval_sess, hparams,
-      summary_writer, sample_src_data,
-      sample_tgt_data, avg_ckpts)
+      summary_writer, sample_text_data,
+      sample_attr_data, avg_ckpts)
 
-  print("Got here!")
   exit()
 
   last_stats_step = global_step
@@ -676,20 +674,34 @@ def _internal_eval(model, global_step, sess, iterator, iterator_feed_dict,
   return ppl
 
 
-def _sample_decode(model, global_step, sess, hparams, iterator, src_data,
-                   tgt_data, iterator_src_placeholder,
+def _reverse_style_lookup(hparams, style_list):
+  style_descriptors = []
+  offset = 0
+  for attr_dict, i in zip(hparams.style_metadata['attributes'], style_list):
+    attr_list = attr_dict[list(attr_dict.keys())[0]]
+    style_descriptors.append(attr_list[i-offset])
+    offset += len(attr_list)
+
+  return " ".join(style_descriptors)
+
+
+def _sample_decode(model, global_step, sess, hparams, iterator,
+                   sample_text_data, sample_attr_data,
+                   iterator_text_placeholder, iterator_attr_placeholder,
                    iterator_batch_size_placeholder, summary_writer):
   """Pick a sentence and decode."""
-  decode_id = random.randint(0, len(src_data) - 1)
+  decode_id = random.randint(0, len(sample_text_data) - 1)
   utils.print_out("  # %d" % decode_id)
 
   iterator_feed_dict = {
-      iterator_src_placeholder: [src_data[decode_id]],
+      iterator_text_placeholder: [sample_text_data[decode_id]],
+      iterator_attr_placeholder: [sample_attr_data[decode_id]],
       iterator_batch_size_placeholder: 1,
   }
   sess.run(iterator.initializer, feed_dict=iterator_feed_dict)
 
-  nmt_outputs, attention_summary = model.decode(sess)
+  nmt_outputs, attention_summary, sample_style = model.decode(sess)
+  sample_style = _reverse_style_lookup(hparams, list(sample_style.flatten()))
 
   if hparams.infer_mode == "beam_search":
     # get the top translation.
@@ -700,9 +712,11 @@ def _sample_decode(model, global_step, sess, hparams, iterator, src_data,
       sent_id=0,
       tgt_eos=hparams.eos,
       subword_option=hparams.subword_option)
-  utils.print_out("    src: %s" % src_data[decode_id])
-  utils.print_out("    ref: %s" % tgt_data[decode_id])
-  utils.print_out(b"    nmt: " + translation)
+  utils.print_out("    original style: %s" % sample_attr_data[decode_id])
+  utils.print_out("    original: %s\n" % sample_text_data[decode_id])
+  utils.print_out("    transfer style: %s" % sample_style)
+  utils.print_out(b"    transfer: " + translation)
+  utils.print_out("\n")
 
   # Summary
   if attention_summary is not None:

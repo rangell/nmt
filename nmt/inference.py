@@ -80,6 +80,17 @@ def load_data(inference_input_file, hparams=None):
   return inference_data
 
 
+def load_attributes(inference_attr_file, hparams=None):
+  """Load inference attibutes data."""
+  with codecs.getreader("utf-8")(
+      tf.gfile.GFile(inference_attr_file, mode="rb")) as f:
+    inference_data = f.read().splitlines()
+
+  inference_data = [line.replace(",", " ") for line in inference_data]
+
+  return inference_data
+
+
 def get_model_creator(hparams):
   """Get the right model class depending on configuration."""
   if (hparams.encoder_type == "gnmt" or

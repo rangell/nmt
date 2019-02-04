@@ -203,8 +203,8 @@ def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
 
 class InferModel(
     collections.namedtuple("InferModel",
-                           ("graph", "model", "text_file_placeholder",
-                            "attributes_file_placeholder", "batch_size_placeholder",
+                           ("graph", "model", "text_placeholder",
+                            "attributes_placeholder", "batch_size_placeholder",
                             "iterator"))):
   pass
 
@@ -223,17 +223,14 @@ def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
 
     style_table = style_utils.create_style_table(style_metadata)
 
-    text_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
-    attributes_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
+    text_placeholder = tf.placeholder(shape=[None], dtype=tf.string)
+    attributes_placeholder = tf.placeholder(shape=[None], dtype=tf.string)
     batch_size_placeholder = tf.placeholder(shape=[], dtype=tf.int64)
 
-    text_dataset = tf.data.TextLineDataset(text_file_placeholder)
+    text_dataset = tf.data.Dataset.from_tensor_slices(text_placeholder)
+    attributes_dataset = tf.data.Dataset.from_tensor_slices(
+        attributes_placeholder)
     
-    record_defaults = [tf.string] * len(hparams.style_metadata['attributes'])
-    attributes_dataset = tf.data.experimental.CsvDataset(
-        attributes_file_placeholder,
-        record_defaults)
-
     iterator = iterator_utils.get_style_infer_iterator(
         hparams,
         text_dataset,
@@ -258,8 +255,8 @@ def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
   return InferModel(
       graph=graph,
       model=model,
-      text_file_placeholder=text_file_placeholder,
-      attributes_file_placeholder=attributes_file_placeholder,
+      text_placeholder=text_placeholder,
+      attributes_placeholder=attributes_placeholder,
       batch_size_placeholder=batch_size_placeholder,
       iterator=iterator)
 
