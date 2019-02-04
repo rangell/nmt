@@ -724,7 +724,7 @@ class BaseModel(object):
         ###        back_trans
 
         #infer_mode = "sample" if back_trans else hparams.infer_mode
-        infer_mode = "greedy"
+        infer_mode = "sample"
 
         self.infer_mode = infer_mode
         
@@ -762,10 +762,16 @@ class BaseModel(object):
         elif infer_mode == "sample":
           # Helper
           sampling_temperature = tf.constant(hparams.sampling_temperature)
+          sampling_temperature = tf.constant(0.1)
           # assert sampling_temperature > 0.0
           ### TODO: fix the sampling_temperature schedule
-          helper = tf.contrib.seq2seq.SampleEmbeddingHelper(
-              self.embedding, start_tokens, end_token,
+
+          #helper = tf.contrib.seq2seq.SampleEmbeddingHelper(
+          #    self.embedding, start_tokens, end_token,
+          #    softmax_temperature=sampling_temperature,
+          #    seed=self.random_seed)
+          helper = inference_helpers.SampleInferenceHelper(
+              self.embedding, style_emb_inp, end_token,
               softmax_temperature=sampling_temperature,
               seed=self.random_seed)
         elif infer_mode == "greedy":
