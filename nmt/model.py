@@ -481,7 +481,11 @@ class BaseModel(object):
 
       ## Loss
       if self.mode != tf.contrib.learn.ModeKeys.INFER:
-        (logits, sample_id, final_context_state) = None, None, None
+        logits = ae_logits
+        sample_id = ae_sample_id
+        final_context_state = ae_final_context_state
+        #(logits, sample_id, final_context_state) = None, None, None
+
         with tf.device(model_helper.get_device_str(self.num_encoder_layers - 1,
                                                    self.num_gpus)):
           ae_loss = self._compute_loss(ae_logits, ae_decoder_cell_outputs)
