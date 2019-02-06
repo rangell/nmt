@@ -177,7 +177,8 @@ class BaseModel(object):
 
     # Style Table
     self.style_metadata = hparams.style_metadata
-    self.style_table = style_utils.create_style_table(self.style_metadata)
+    self.style_file = hparams.style_file
+    self.style_table = style_utils.create_style_table(self.style_file)
 
     # Style Embeddings
     self.style_embedding = style_utils.create_style_embedding(

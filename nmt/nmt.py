@@ -496,6 +496,16 @@ def extend_hparams(hparams):
   # Load style metadata
   style_metadata=json.load(open(hparams.metadata_filename, 'r'))
 
+  # Create file containing all of the styles
+  styles = [] # list of all the styles as strings
+  for attribute_dict in style_metadata['attributes']:
+    styles += attribute_dict[list(attribute_dict.keys())[0]]
+
+  style_file = hparams.metadata_filename + ".styles"
+  with open(style_file, 'w') as f:
+    for s in styles:
+      f.write('%s\n' % s)
+
   # Get number of styles
   num_styles = 0 # list of all the styles as strings
   for attribute_dict in style_metadata['attributes']:
@@ -503,6 +513,7 @@ def extend_hparams(hparams):
     
   _add_argument(hparams, "style_metadata", style_metadata)
   _add_argument(hparams, "num_styles", num_styles)
+  _add_argument(hparams, "style_file", style_file)
 
   # Num embedding partitions
   num_embeddings_partitions = getattr(hparams, "num_embeddings_partitions", 0)

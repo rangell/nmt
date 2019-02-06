@@ -86,13 +86,14 @@ def create_train_model(
   text_file = "%s.%s" % (hparams.train_prefix, hparams.text)
   attributes_file = "%s.%s" % (hparams.train_prefix, hparams.attributes)
   vocab_file = hparams.vocab_file
+  style_file = hparams.style_file
   style_metadata = hparams.style_metadata
 
   graph = tf.Graph()
 
   with graph.as_default(), tf.container(scope or "train"):
     vocab_table = vocab_utils.create_vocab_table(vocab_file)
-    style_table = style_utils.create_style_table(style_metadata)
+    style_table = style_utils.create_style_table(style_file)
 
     text_dataset = tf.data.TextLineDataset(text_file)
     
@@ -149,6 +150,7 @@ class EvalModel(
 def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
   """Create train graph, model, src/tgt file holders, and iterator."""
   vocab_file = hparams.vocab_file
+  style_file = hparams.style_file
   style_metadata = hparams.style_metadata
 
   graph = tf.Graph()
@@ -158,7 +160,7 @@ def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
     reverse_vocab_table = lookup_ops.index_to_string_table_from_file(
         vocab_file, default_value=vocab_utils.UNK)
 
-    style_table = style_utils.create_style_table(style_metadata)
+    style_table = style_utils.create_style_table(style_file)
 
     text_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
     attributes_file_placeholder = tf.placeholder(shape=(), dtype=tf.string)
@@ -214,6 +216,7 @@ def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
 
   graph = tf.Graph()
   vocab_file = hparams.vocab_file
+  style_file = hparams.style_file
   style_metadata = hparams.style_metadata
 
   with graph.as_default(), tf.container(scope or "infer"):
@@ -221,7 +224,7 @@ def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
     reverse_vocab_table = lookup_ops.index_to_string_table_from_file(
         vocab_file, default_value=vocab_utils.UNK)
 
-    style_table = style_utils.create_style_table(style_metadata)
+    style_table = style_utils.create_style_table(style_file)
 
     text_placeholder = tf.placeholder(shape=[None], dtype=tf.string)
     attributes_placeholder = tf.placeholder(shape=[None], dtype=tf.string)

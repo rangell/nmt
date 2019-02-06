@@ -158,16 +158,23 @@ def run_external_eval(infer_model,
     dev_infer_iterator_feed_dict = {}
   if test_infer_iterator_feed_dict is None:
     test_infer_iterator_feed_dict = {}
+
   with infer_model.graph.as_default():
     loaded_infer_model, global_step = model_helper.create_or_load_model(
         infer_model.model, model_dir, infer_sess, "infer")
 
-  dev_src_file = "%s.%s" % (hparams.dev_prefix, hparams.src)
-  dev_tgt_file = "%s.%s" % (hparams.dev_prefix, hparams.tgt)
-  dev_infer_iterator_feed_dict[
-      infer_model.src_placeholder] = inference.load_data(dev_src_file)
-  dev_infer_iterator_feed_dict[
-      infer_model.batch_size_placeholder] = hparams.infer_batch_size
+  dev_text_file = "%s.%s" % (hparams.dev_prefix, hparams.text)
+  dev_attributes_file = "%s.%s" % (hparams.dev_prefix, hparams.attributes)
+  dev_text_data = inference.load_data(dev_text_file)
+  dev_attr_data = inference.load_attributes(dev_attributes_file)
+
+  dev_infer_iterator_feed_dict = {
+      infer_model.text_placeholder: dev_text_data,
+      infer_model.attributes_placeholder: dev_attr_data,
+      infer_model.batch_size_placeholder: len(dev_text_data)
+  }
+
+  # tgt file is just the original sentence (i.e. computing self-BLEU)
   dev_scores = _external_eval(
       loaded_infer_model,
       global_step,
@@ -175,7 +182,7 @@ def run_external_eval(infer_model,
       hparams,
       infer_model.iterator,
       dev_infer_iterator_feed_dict,
-      dev_tgt_file,
+      dev_text_file,
       "dev",
       summary_writer,
       save_on_best=save_best_dev,
@@ -183,12 +190,17 @@ def run_external_eval(infer_model,
 
   test_scores = None
   if use_test_set and hparams.test_prefix:
-    test_src_file = "%s.%s" % (hparams.test_prefix, hparams.src)
-    test_tgt_file = "%s.%s" % (hparams.test_prefix, hparams.tgt)
-    test_infer_iterator_feed_dict[
-        infer_model.src_placeholder] = inference.load_data(test_src_file)
-    test_infer_iterator_feed_dict[
-        infer_model.batch_size_placeholder] = hparams.infer_batch_size
+    test_text_file = "%s.%s" % (hparams.test_prefix, hparams.text)
+    test_attributes_file = "%s.%s" % (hparams.test_prefix, hparams.attributes)
+    test_text_data = inference.load_data(test_text_file)
+    test_attr_data = inference.load_attributes(test_attributes_file)
+
+    test_infer_iterator_feed_dict = {
+        infer_model.text_placeholder: test_text_data,
+        infer_model.attributes_placeholder: test_attr_data,
+        infer_model.batch_size_placeholder: len(test_text_data)
+    }
+
     test_scores = _external_eval(
         loaded_infer_model,
         global_step,
@@ -196,11 +208,12 @@ def run_external_eval(infer_model,
         hparams,
         infer_model.iterator,
         test_infer_iterator_feed_dict,
-        test_tgt_file,
+        test_text_file,
         "test",
         summary_writer,
         save_on_best=False,
         avg_ckpts=avg_ckpts)
+
   return dev_scores, test_scores, global_step
 
 
@@ -276,46 +289,40 @@ def run_internal_and_external_eval(model_dir,
       dev_eval_iterator_feed_dict=dev_eval_iterator_feed_dict,
       test_eval_iterator_feed_dict=test_eval_iterator_feed_dict)
 
-  #dev_scores, test_scores, global_step = run_external_eval(
-  #    infer_model,
-  #    infer_sess,
-  #    model_dir,
-  #    hparams,
-  #    summary_writer,
-  #    dev_infer_iterator_feed_dict=dev_infer_iterator_feed_dict,
-  #    test_infer_iterator_feed_dict=test_infer_iterator_feed_dict)
+  dev_scores, test_scores, global_step = run_external_eval(
+      infer_model,
+      infer_sess,
+      model_dir,
+      hparams,
+      summary_writer,
+      dev_infer_iterator_feed_dict=dev_infer_iterator_feed_dict,
+      test_infer_iterator_feed_dict=test_infer_iterator_feed_dict)
 
-  #metrics = {
-  #    "dev_ppl": dev_ppl,
-  #    "test_ppl": test_ppl,
-  #    "dev_scores": dev_scores,
-  #    "test_scores": test_scores,
-  #}
   metrics = {
       "dev_ppl": dev_ppl,
       "test_ppl": test_ppl,
+      "dev_scores": dev_scores,
+      "test_scores": test_scores,
   }
 
-  #avg_dev_scores, avg_test_scores = None, None
-  #if avg_ckpts:
-  #  avg_dev_scores, avg_test_scores = run_avg_external_eval(
-  #      infer_model, infer_sess, model_dir, hparams, summary_writer,
-  #      global_step)
-  #  metrics["avg_dev_scores"] = avg_dev_scores
-  #  metrics["avg_test_scores"] = avg_test_scores
+  avg_dev_scores, avg_test_scores = None, None
+  if avg_ckpts:
+    avg_dev_scores, avg_test_scores = run_avg_external_eval(
+        infer_model, infer_sess, model_dir, hparams, summary_writer,
+        global_step)
+    metrics["avg_dev_scores"] = avg_dev_scores
+    metrics["avg_test_scores"] = avg_test_scores
 
-  #result_summary = _format_results("dev", dev_ppl, dev_scores, hparams.metrics)
-  #if avg_dev_scores:
-  #  result_summary += ", " + _format_results("avg_dev", None, avg_dev_scores,
-  #                                           hparams.metrics)
-  #if hparams.test_prefix:
-  #  result_summary += ", " + _format_results("test", test_ppl, test_scores,
-  #                                           hparams.metrics)
-  #  if avg_test_scores:
-  #    result_summary += ", " + _format_results("avg_test", None,
-  #                                             avg_test_scores, hparams.metrics)
-
-  result_summary = ""
+  result_summary = _format_results("dev", dev_ppl, dev_scores, hparams.metrics)
+  if avg_dev_scores:
+    result_summary += ", " + _format_results("avg_dev", None, avg_dev_scores,
+                                             hparams.metrics)
+  if hparams.test_prefix:
+    result_summary += ", " + _format_results("test", test_ppl, test_scores,
+                                             hparams.metrics)
+    if avg_test_scores:
+      result_summary += ", " + _format_results("avg_test", None,
+                                               avg_test_scores, hparams.metrics)
 
   return result_summary, global_step, metrics
 
@@ -541,13 +548,13 @@ def train(hparams, scope=None, target_session=""):
           global_step)
       exit()
       run_sample_decode(infer_model, infer_sess, model_dir, hparams,
-                        summary_writer, sample_src_data, sample_tgt_data)
-      #run_external_eval(infer_model, infer_sess, model_dir, hparams,
-      #                  summary_writer)
-      #
-      #if avg_ckpts:
-      #  run_avg_external_eval(infer_model, infer_sess, model_dir, hparams,
-      #                        summary_writer, global_step)
+                        summary_writer, sample_text_data, sample_attr_data)
+      run_external_eval(infer_model, infer_sess, model_dir, hparams,
+                        summary_writer)
+      
+      if avg_ckpts:
+        run_avg_external_eval(infer_model, infer_sess, model_dir, hparams,
+                              summary_writer, global_step)
 
       train_sess.run(
           train_model.iterator.initializer,
@@ -585,8 +592,8 @@ def train(hparams, scope=None, target_session=""):
 
       # Evaluate on dev/test
       run_sample_decode(infer_model, infer_sess,
-                        model_dir, hparams, summary_writer, sample_src_data,
-                        sample_tgt_data)
+                        model_dir, hparams, summary_writer, sample_text_data,
+                        sample_attr_data)
       run_internal_eval(
           eval_model, eval_sess, model_dir, hparams, summary_writer)
 
@@ -599,15 +606,15 @@ def train(hparams, scope=None, target_session=""):
           os.path.join(out_dir, "translate.ckpt"),
           global_step=global_step)
       run_sample_decode(infer_model, infer_sess,
-                        model_dir, hparams, summary_writer, sample_src_data,
-                        sample_tgt_data)
-      #run_external_eval(
-      #    infer_model, infer_sess, model_dir,
-      #    hparams, summary_writer)
+                        model_dir, hparams, summary_writer, sample_text_data,
+                        sample_attr_data)
+      run_external_eval(
+          infer_model, infer_sess, model_dir,
+          hparams, summary_writer)
 
-      #if avg_ckpts:
-      #  run_avg_external_eval(infer_model, infer_sess, model_dir, hparams,
-      #                        summary_writer, global_step)
+      if avg_ckpts:
+        run_avg_external_eval(infer_model, infer_sess, model_dir, hparams,
+                              summary_writer, global_step)
 
   # Done training
   loaded_train_model.saver.save(

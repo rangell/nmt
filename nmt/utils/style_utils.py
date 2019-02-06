@@ -17,25 +17,18 @@ from __future__ import print_function
 
 import tensorflow as tf
 
+from tensorflow.python.ops import lookup_ops
+
 from IPython import embed
 
 
-def create_style_table(style_metadata):
-  ## Create table
-  styles = [] # list of all the styles as strings
-  for attribute_dict in style_metadata['attributes']:
-    styles += attribute_dict[list(attribute_dict.keys())[0]]
-
-  mapping_strings = tf.constant(styles)
-  style_table = tf.contrib.lookup.index_table_from_tensor(
-      mapping=mapping_strings, num_oov_buckets=0, default_value=-1)
-  
+def create_style_table(style_file):
   """
   ### To query table:
   sample_attr = tf.constant(['positive', 'male', 'asian'])
   ids = style_table.lookup(sample_attr)
   """
-  return style_table
+  return lookup_ops.index_table_from_file(style_file)
 
 
 def create_style_embedding(num_styles, embed_size):
