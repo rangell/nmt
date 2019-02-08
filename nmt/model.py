@@ -144,6 +144,9 @@ class BaseModel(object):
     assert self.num_encoder_layers
     assert self.num_decoder_layers
 
+    # Set maxpool window width
+    self.maxpool_width = hparams.maxpool_width
+
     # Set num residual layers
     if hasattr(hparams, "num_residual_layers"):  # compatible common_test_utils
       self.num_encoder_residual_layers = hparams.num_residual_layers
@@ -217,11 +220,14 @@ class BaseModel(object):
       # decay
       self.learning_rate = self._get_learning_rate_decay(hparams)
 
+      # beta1 for Adam
+      self.beta1 = tf.constant(hparams.beta1)
+
       # Optimizer
       if hparams.optimizer == "sgd":
         opt = tf.train.GradientDescentOptimizer(self.learning_rate)
       elif hparams.optimizer == "adam":
-        opt = tf.train.AdamOptimizer(self.learning_rate)
+        opt = tf.train.AdamOptimizer(self.learning_rate, beta1=self.beta1)
       else:
         raise ValueError("Unknown optimizer type %s" % hparams.optimizer)
 
@@ -428,11 +434,24 @@ class BaseModel(object):
       # Train or eval
       if self.mode != tf.contrib.learn.ModeKeys.INFER:
         ## Auto-encode 
+        # Noise input sequence
         noisy_sequence = self._noise_sequence(sequence)
 
+        # Encode input sequence
         encoder_outputs, encoder_state = self._build_encoder(hparams,
             noisy_sequence, sequence_length)
 
+        # Apply temporal max-pooling
+        if self.time_major:
+          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+          
+        encoder_outputs = tf.layers.max_pooling1d(encoder_outputs,
+            self.maxpool_width, self.maxpool_width, name="maxpool")
+
+        if self.time_major:
+          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+
+        # Decode input sequence
         (ae_logits, ae_decoder_cell_outputs, 
          ae_sample_id, ae_final_context_state) = (self._build_decoder(hparams,
            encoder_outputs, encoder_state, sequence_length, style_labels))
@@ -441,6 +460,17 @@ class BaseModel(object):
         encoder_outputs, encoder_state = self._build_encoder(hparams,
             sequence, sequence_length)
 
+        # Apply temporal max-pooling
+        if self.time_major:
+          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+          
+        encoder_outputs = tf.layers.max_pooling1d(encoder_outputs,
+            self.maxpool_width, self.maxpool_width, name="maxpool")
+
+        if self.time_major:
+          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+
+        # Decode input sequence
         _, _, sample_id, self.final_context_state = \
             self._build_decoder(hparams, encoder_outputs,
             encoder_state, sequence_length, self.target_style_labels,
@@ -464,6 +494,18 @@ class BaseModel(object):
 
         encoder_outputs, encoder_state = self._build_encoder(hparams,
             sampled_pseudo_sequence, sampled_seq_length)
+
+        # Apply temporal max-pooling
+        if self.time_major:
+          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+          
+        encoder_outputs = tf.layers.max_pooling1d(encoder_outputs,
+            self.maxpool_width, self.maxpool_width, name="maxpool")
+
+        if self.time_major:
+          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+
+        # Decode input sequence
 
         (bt_logits, bt_decoder_cell_outputs, 
          bt_sample_id, bt_final_context_state) = (self._build_decoder(hparams,
@@ -491,8 +533,13 @@ class BaseModel(object):
                                                    self.num_gpus)):
           ae_loss = self._compute_loss(ae_logits, ae_decoder_cell_outputs)
           bt_loss = self._compute_loss(bt_logits, bt_decoder_cell_outputs)
+  
+          
+          lambda_ae = (1 - ((self.lambda_ae 
+                                 * tf.cast(self.global_step, tf.float32))
+                                / hparams.num_train_steps))
 
-          loss = (self.lambda_ae * ae_loss) + (self.lambda_bt * bt_loss)
+          loss = (lambda_ae * ae_loss) + (self.lambda_bt * bt_loss)
       else:
         loss = tf.constant(0.0)
 
@@ -1042,6 +1089,10 @@ class Model(BaseModel):
     """
     # Construct forward and backward cells
     fw_cell = self._build_encoder_cell(hparams,
+                                       num_bi_layers,
+                                       num_bi_residual_layers,
+                                       base_gpu=base_gpu)
+    bw_cell = self._build_encoder_cell(hparams,
                                        num_bi_layers,
                                        num_bi_residual_layers,
                                        base_gpu=(base_gpu + num_bi_layers))

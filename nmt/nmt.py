@@ -69,6 +69,8 @@ def add_arguments(parser):
                       help="Whether to use time-major mode for dynamic RNN.")
   parser.add_argument("--num_embeddings_partitions", type=int, default=0,
                       help="Number of partitions for embedding vars.")
+  parser.add_argument("--maxpool_width", type=int, default=5, help="""\
+                       Temporal max-pooling non-overlapping window width.""")
 
   # Attention mechanisms
   parser.add_argument("--attention", type=str, default="", help="""\
@@ -107,6 +109,8 @@ def add_arguments(parser):
   parser.add_argument("--optimizer", type=str, default="sgd", help="sgd | adam")
   parser.add_argument("--learning_rate", type=float, default=1.0,
                       help="Learning rate. Adam: 0.001 | 0.0001")
+  parser.add_argument("--beta1", type=float, default=0.9,
+                      help="beta1 parameter for Adam optimizer")
   parser.add_argument("--warmup_steps", type=int, default=0,
                       help="How many steps we inverse-decay learning.")
   parser.add_argument("--warmup_scheme", type=str, default="t2t", help="""\
@@ -335,6 +339,7 @@ def create_hparams(flags):
       residual=flags.residual,
       time_major=flags.time_major,
       num_embeddings_partitions=flags.num_embeddings_partitions,
+      maxpool_width=flags.maxpool_width,
 
       # Attention mechanisms
       attention=flags.attention,
@@ -350,6 +355,7 @@ def create_hparams(flags):
       init_weight=flags.init_weight,
       max_gradient_norm=flags.max_gradient_norm,
       learning_rate=flags.learning_rate,
+      beta1=flags.beta1,
       warmup_steps=flags.warmup_steps,
       warmup_scheme=flags.warmup_scheme,
       decay_scheme=flags.decay_scheme,

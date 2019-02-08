@@ -520,6 +520,7 @@ def train(hparams, scope=None, target_session=""):
   summary_writer = tf.summary.FileWriter(
       os.path.join(out_dir, summary_name), train_model.graph)
 
+
   # First evaluation
   run_full_eval(
       model_dir, infer_model, infer_sess,
@@ -546,7 +547,6 @@ def train(hparams, scope=None, target_session=""):
       utils.print_out(
           "# Finished an epoch, step %d. Perform external evaluation" %
           global_step)
-      exit()
       run_sample_decode(infer_model, infer_sess, model_dir, hparams,
                         summary_writer, sample_text_data, sample_attr_data)
       run_external_eval(infer_model, infer_sess, model_dir, hparams,
@@ -765,6 +765,7 @@ def _external_eval(model, global_step, sess, hparams, iterator,
       tgt_eos=hparams.eos,
       decode=decode,
       infer_mode=hparams.infer_mode)
+
   # Save on best metrics
   if decode:
     for metric in hparams.metrics:
