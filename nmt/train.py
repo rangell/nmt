@@ -520,6 +520,11 @@ def train(hparams, scope=None, target_session=""):
   summary_writer = tf.summary.FileWriter(
       os.path.join(out_dir, summary_name), train_model.graph)
 
+  #train_sess.run(
+  #    train_model.iterator.initializer,
+  #    feed_dict={train_model.skip_count_placeholder: 0})
+  #print(train_sess.run(train_model.model.encoder_outputs).shape)
+  #exit()
 
   # First evaluation
   run_full_eval(

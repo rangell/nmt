@@ -416,8 +416,6 @@ class BaseModel(object):
 
     with tf.variable_scope(scope or "dynamic_seq2seq", dtype=self.dtype,
         reuse=tf.AUTO_REUSE):
-      if hparams.language_model:
-        return self._build_language_model(hparams)
 
 
       assert not self.extract_encoder_layers
@@ -431,8 +429,17 @@ class BaseModel(object):
       #### TODO: build different graph for inference
       self.target_style_labels = self._sample_style_labels(style_labels)
 
+      if hparams.language_model:
+        encoder_outputs = None
+        encoder_state = None
+
+        (logits, decoder_cell_outputs, 
+          sample_id, final_context_state) = self._build_decoder(hparams,
+              encoder_outputs, encoder_state, sequence_length,
+              self.target_style_labels, back_trans=False)
+
       # Train or eval
-      if self.mode != tf.contrib.learn.ModeKeys.INFER:
+      elif self.mode != tf.contrib.learn.ModeKeys.INFER:
         ## Auto-encode 
         # Noise input sequence
         noisy_sequence = self._noise_sequence(sequence)
@@ -523,7 +530,12 @@ class BaseModel(object):
 
 
       ## Loss
-      if self.mode != tf.contrib.learn.ModeKeys.INFER:
+      if hparams.language_model:
+        with tf.device(model_helper.get_device_str(self.num_encoder_layers - 1,
+                                                   self.num_gpus)):
+          loss = self._compute_loss(logits, decoder_cell_outputs)
+
+      elif self.mode != tf.contrib.learn.ModeKeys.INFER:
         logits = ae_logits
         sample_id = ae_sample_id
         final_context_state = ae_final_context_state
@@ -1053,12 +1065,20 @@ class Model(BaseModel):
         if num_bi_layers == 1:
           encoder_state = bi_encoder_state
         else:
-          # alternatively concat forward and backward states
+          #$# alternatively concat forward and backward states
+          #encoder_state = []
+          #for layer_id in range(num_bi_layers):
+          #  encoder_state.append(bi_encoder_state[0][layer_id])  # forward
+          #  encoder_state.append(bi_encoder_state[1][layer_id])  # backward
+          #encoder_state = tuple(encoder_state)
+          
+          ## FOR OUR USE CASE: Just want the top layer
           encoder_state = []
-          for layer_id in range(num_bi_layers):
-            encoder_state.append(bi_encoder_state[0][layer_id])  # forward
-            encoder_state.append(bi_encoder_state[1][layer_id])  # backward
+          layer_id = num_bi_layers - 1
+          encoder_state.append(bi_encoder_state[0][layer_id])  # forward
+          encoder_state.append(bi_encoder_state[1][layer_id])  # backward
           encoder_state = tuple(encoder_state)
+
       else:
         raise ValueError("Unknown encoder_type %s" % hparams.encoder_type)
 

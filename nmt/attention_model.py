@@ -108,7 +108,7 @@ class AttentionModel(model.Model):
 
     # Attention
     attention_mechanism = self.attention_mechanism_fn(hparams.attention,
-        num_units, memory, source_sequence_length,self.mode)
+        num_units, memory, source_sequence_length, self.mode)
 
     cell = model_helper.create_rnn_cell(
         unit_type=hparams.unit_type,
