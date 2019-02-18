@@ -434,15 +434,16 @@ class BaseModel(object):
         encoder_state = None
 
         (logits, decoder_cell_outputs, 
-          sample_id, final_context_state) = self._build_decoder(hparams,
-              encoder_outputs, encoder_state, sequence_length,
-              self.target_style_labels, back_trans=False)
+         sample_id, final_context_state) = (self._build_decoder(hparams,
+           encoder_outputs, encoder_state, sequence_length, style_labels))
 
       # Train or eval
       elif self.mode != tf.contrib.learn.ModeKeys.INFER:
         ## Auto-encode 
         # Noise input sequence
-        noisy_sequence = self._noise_sequence(sequence)
+        noisy_sequence = self._noise_sequence(sequence,
+            word_drop=hparams.word_drop,
+            permutation_limit=hparams.permutation_limit)
 
         # Encode input sequence
         encoder_outputs, encoder_state = self._build_encoder(hparams,
@@ -530,7 +531,8 @@ class BaseModel(object):
 
 
       ## Loss
-      if hparams.language_model:
+      if (hparams.language_model          
+          and self.mode != tf.contrib.learn.ModeKeys.INFER):
         with tf.device(model_helper.get_device_str(self.num_encoder_layers - 1,
                                                    self.num_gpus)):
           loss = self._compute_loss(logits, decoder_cell_outputs)

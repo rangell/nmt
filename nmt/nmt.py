@@ -71,6 +71,10 @@ def add_arguments(parser):
                       help="Number of partitions for embedding vars.")
   parser.add_argument("--maxpool_width", type=int, default=5, help="""\
                        Temporal max-pooling non-overlapping window width.""")
+  parser.add_argument("--word_drop", type=float, default=0.1,
+                      help="Parameter for denoising autoencoder.")
+  parser.add_argument("--permutation_limit", type=int, default=3,
+                      help="Parameter for denoising autoencoder.")
 
   # Attention mechanisms
   parser.add_argument("--attention", type=str, default="", help="""\
@@ -185,7 +189,7 @@ def add_arguments(parser):
                       """)
 
   # Sequence lengths
-  parser.add_argument("--max_len", type=int, default=50,
+  parser.add_argument("--max_len", type=int, default=300,
                       help="Max length of sequences during training.")
   parser.add_argument("--max_len_infer", type=int, default=None,
                       help="""\
@@ -340,6 +344,8 @@ def create_hparams(flags):
       time_major=flags.time_major,
       num_embeddings_partitions=flags.num_embeddings_partitions,
       maxpool_width=flags.maxpool_width,
+      word_drop=flags.word_drop,
+      permutation_limit=flags.permutation_limit,
 
       # Attention mechanisms
       attention=flags.attention,
@@ -468,13 +474,9 @@ def extend_hparams(hparams):
 
   # Language modeling
   if getattr(hparams, "language_model", None):
-    raise NotImplementedError("Language Model for Style Transfer is not yet"
-                              "implemented.")
     hparams.attention = ""
     hparams.attention_architecture = ""
     hparams.pass_hidden_state = False
-    hparams.share_vocab = True
-    hparams.src = hparams.tgt
     utils.print_out("For language modeling, we turn off attention and "
                     "pass_hidden_state; turn on share_vocab; set src to tgt.")
 

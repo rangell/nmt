@@ -171,7 +171,7 @@ def run_external_eval(infer_model,
   dev_infer_iterator_feed_dict = {
       infer_model.text_placeholder: dev_text_data,
       infer_model.attributes_placeholder: dev_attr_data,
-      infer_model.batch_size_placeholder: len(dev_text_data)
+      infer_model.batch_size_placeholder: hparams.batch_size
   }
 
   # tgt file is just the original sentence (i.e. computing self-BLEU)
@@ -198,7 +198,7 @@ def run_external_eval(infer_model,
     test_infer_iterator_feed_dict = {
         infer_model.text_placeholder: test_text_data,
         infer_model.attributes_placeholder: test_attr_data,
-        infer_model.batch_size_placeholder: len(test_text_data)
+        infer_model.batch_size_placeholder: hparams.batch_size
     }
 
     test_scores = _external_eval(
@@ -523,7 +523,8 @@ def train(hparams, scope=None, target_session=""):
   #train_sess.run(
   #    train_model.iterator.initializer,
   #    feed_dict={train_model.skip_count_placeholder: 0})
-  #print(train_sess.run(train_model.model.encoder_outputs).shape)
+
+  #print(train_sess.run(train_model.iterator.target_output).shape)
   #exit()
 
   # First evaluation
@@ -731,6 +732,7 @@ def _sample_decode(model, global_step, sess, hparams, iterator,
       sent_id=0,
       tgt_eos=hparams.eos,
       subword_option=hparams.subword_option)
+
   utils.print_out("    original style: %s" % sample_attr_data[decode_id])
   utils.print_out("    original: %s\n" % sample_text_data[decode_id])
   utils.print_out("    transfer style: %s" % sample_style)
