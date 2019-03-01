@@ -516,12 +516,15 @@ def extend_hparams(hparams):
 
   # Get number of styles
   num_styles = 0 # list of all the styles as strings
+  styles = []
   for attribute_dict in style_metadata['attributes']:
+    styles += attribute_dict[list(attribute_dict.keys())[0]]
     num_styles += len(attribute_dict[list(attribute_dict.keys())[0]])
     
   _add_argument(hparams, "style_metadata", style_metadata)
   _add_argument(hparams, "num_styles", num_styles)
   _add_argument(hparams, "style_file", style_file)
+  _add_argument(hparams, "styles", styles)
 
   # Num embedding partitions
   num_embeddings_partitions = getattr(hparams, "num_embeddings_partitions", 0)

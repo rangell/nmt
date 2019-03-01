@@ -325,7 +325,24 @@ class BaseModel(object):
 
   def init_embeddings(self, hparams, scope):
     """Init embeddings."""
+    # Old embedding -- just to keep the peace for now
     self.embedding = model_helper.create_emb_for_encoder_and_decoder(
+      vocab_size=self.vocab_size,
+      embed_size=self.num_units,
+      num_enc_partitions=hparams.num_enc_emb_partitions,
+      num_dec_partitions=hparams.num_dec_emb_partitions,
+      vocab_file=hparams.vocab_file,
+      embed_file=hparams.embed_file,
+      use_char_encode=hparams.use_char_encode,
+      scope=scope,
+      name="embedding")
+
+    # New style specific embeddings
+    style_specific_embeddings = []
+    for i in range(self.num_styles):
+      style_specific_embeddings.append(
+        tf.expand_dims(
+          model_helper.create_emb_for_encoder_and_decoder(
             vocab_size=self.vocab_size,
             embed_size=self.num_units,
             num_enc_partitions=hparams.num_enc_emb_partitions,
@@ -333,7 +350,9 @@ class BaseModel(object):
             vocab_file=hparams.vocab_file,
             embed_file=hparams.embed_file,
             use_char_encode=hparams.use_char_encode,
-            scope=scope,)
+            scope=scope,
+            name="embedding"+str(i)), axis=1))
+    self.embedding_tensor = tf.concat(style_specific_embeddings, axis=1)
 
   def _init_style_sampling_variables(self):
     ## Get num of the possible styles for each attribute
@@ -417,117 +436,148 @@ class BaseModel(object):
     with tf.variable_scope(scope or "dynamic_seq2seq", dtype=self.dtype,
         reuse=tf.AUTO_REUSE):
 
-
       assert not self.extract_encoder_layers
 
       sequence = self.iterator.source
       sequence_length = self.iterator.source_sequence_length
       style_labels = self.iterator.style_labels
 
-      self.style_labels = style_labels
+      self.inp_emb = self._lookup_embedding(sequence, style_labels)
 
-      #### TODO: build different graph for inference
+
+
       self.target_style_labels = self._sample_style_labels(style_labels)
 
       if hparams.language_model:
-        encoder_outputs = None
-        encoder_state = None
+        with tf.variable_scope("generator", dtype=self.dtype,
+            reuse=tf.AUTO_REUSE):
+          encoder_outputs = None
+          encoder_state = None
 
-        (logits, decoder_cell_outputs, 
-         sample_id, final_context_state) = (self._build_decoder(hparams,
-           encoder_outputs, encoder_state, sequence_length, style_labels))
+          (logits, decoder_cell_outputs, 
+           sample_id, final_context_state) = (self._build_decoder(hparams,
+             encoder_outputs, encoder_state, sequence_length, style_labels))
 
       # Train or eval
       elif self.mode != tf.contrib.learn.ModeKeys.INFER:
-        ## Auto-encode 
-        # Noise input sequence
-        noisy_sequence = self._noise_sequence(sequence,
-            word_drop=hparams.word_drop,
-            permutation_limit=hparams.permutation_limit)
+        with tf.variable_scope("generator", dtype=self.dtype,
+            reuse=tf.AUTO_REUSE):
+          ## Auto-encode 
+          # Noise input sequence
+          noisy_sequence = self._noise_sequence(sequence,
+              word_drop=hparams.word_drop,
+              permutation_limit=hparams.permutation_limit)
 
-        # Encode input sequence
-        encoder_outputs, encoder_state = self._build_encoder(hparams,
-            noisy_sequence, sequence_length)
+          # Encode input sequence
+          encoder_outputs, encoder_state = self._build_encoder(hparams,
+              noisy_sequence, sequence_length)
 
-        # Apply temporal max-pooling
-        if self.time_major:
-          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
-          
-        encoder_outputs = tf.layers.max_pooling1d(encoder_outputs,
-            self.maxpool_width, self.maxpool_width, name="maxpool")
+          # Apply temporal max-pooling
+          if self.time_major:
+            encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+            
+          encoder_outputs = tf.layers.max_pooling1d(encoder_outputs,
+              self.maxpool_width, self.maxpool_width, name="maxpool")
 
-        if self.time_major:
-          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+          if self.time_major:
+            encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
 
-        # Decode input sequence
-        (ae_logits, ae_decoder_cell_outputs, 
-         ae_sample_id, ae_final_context_state) = (self._build_decoder(hparams,
-           encoder_outputs, encoder_state, sequence_length, style_labels))
+          # Decode input sequence
+          (ae_logits, ae_decoder_cell_outputs, 
+           ae_sample_id, ae_final_context_state) = (self._build_decoder(hparams,
+             encoder_outputs, encoder_state, sequence_length, style_labels))
 
-        ## Back-translate
-        encoder_outputs, encoder_state = self._build_encoder(hparams,
-            sequence, sequence_length)
+          ## Back-translate
+          encoder_outputs, encoder_state = self._build_encoder(hparams,
+              sequence, sequence_length)
 
-        # Apply temporal max-pooling
-        if self.time_major:
-          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
-          
-        encoder_outputs = tf.layers.max_pooling1d(encoder_outputs,
-            self.maxpool_width, self.maxpool_width, name="maxpool")
+          # Apply temporal max-pooling
+          if self.time_major:
+            encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+            
+          encoder_outputs = tf.layers.max_pooling1d(encoder_outputs,
+              self.maxpool_width, self.maxpool_width, name="maxpool")
 
-        if self.time_major:
-          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+          if self.time_major:
+            encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
 
-        # Decode input sequence
-        _, _, sample_id, self.final_context_state = \
-            self._build_decoder(hparams, encoder_outputs,
-            encoder_state, sequence_length, self.target_style_labels,
-            back_trans=True)
+          # Decode input sequence
+          sample_logits, _, sample_id, self.final_context_state = \
+              self._build_decoder(hparams, encoder_outputs,
+              encoder_state, sequence_length, self.target_style_labels,
+              back_trans=True)
 
-        sampled_pseudo_sequence = sample_id
+          # Soft sampled seq for feature extractor
+          _dim0, _dim1, _dim2 = (tf.shape(sample_logits)[0],
+                                 tf.shape(sample_logits)[1],
+                                 tf.shape(sample_logits)[2])
+          soft_sampled_seq = tf.nn.softmax(sample_logits, axis=2)
+          soft_sampled_seq = tf.reshape(soft_sampled_seq, [-1, _dim2])
+          soft_sampled_seq = tf.matmul(soft_sampled_seq, self.embedding)
+          soft_sampled_seq = tf.reshape(soft_sampled_seq, [_dim0, _dim1, -1])
+          if self.time_major:
+            soft_sampled_seq = tf.transpose(soft_sampled_seq, [1, 0, 2])
 
-        # transpose it back to batch major if time major.
-        # encoder will automatically transpose it back if time_major
-        if self.time_major:
-          sampled_pseudo_sequence = tf.transpose(sampled_pseudo_sequence)
+          # Hard sampled seq for back-translation
+          sampled_pseudo_sequence = sample_id
 
-        ## Stop gradient from back-propagating all the way through
-        tf.stop_gradient(sampled_pseudo_sequence)
+          # transpose it back to batch major if time major.
+          # encoder will automatically transpose it back if time_major
+          if self.time_major:
+            sampled_pseudo_sequence = tf.transpose(sampled_pseudo_sequence)
 
-        ## Get sampled pseudo sequence's length
-        sampled_seq_length = tf.fill([tf.shape(sampled_pseudo_sequence)[0]],
-                                      tf.shape(sampled_pseudo_sequence)[1])
+          ## Stop gradient from back-propagating all the way through
+          tf.stop_gradient(sampled_pseudo_sequence)
 
-        self.sampled_pseudo_sequence = sampled_pseudo_sequence
+          ## Get sampled pseudo sequence's length
+          sampled_seq_length = tf.fill([tf.shape(sampled_pseudo_sequence)[0]],
+                                        tf.shape(sampled_pseudo_sequence)[1])
 
-        encoder_outputs, encoder_state = self._build_encoder(hparams,
-            sampled_pseudo_sequence, sampled_seq_length)
+          self.sampled_pseudo_sequence = sampled_pseudo_sequence
 
-        # Apply temporal max-pooling
-        if self.time_major:
-          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
-          
-        encoder_outputs = tf.layers.max_pooling1d(encoder_outputs,
-            self.maxpool_width, self.maxpool_width, name="maxpool")
+          encoder_outputs, encoder_state = self._build_encoder(hparams,
+              sampled_pseudo_sequence, sampled_seq_length)
 
-        if self.time_major:
-          encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+          # Apply temporal max-pooling
+          if self.time_major:
+            encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
+            
+          encoder_outputs = tf.layers.max_pooling1d(encoder_outputs,
+              self.maxpool_width, self.maxpool_width, name="maxpool")
 
-        # Decode input sequence
+          if self.time_major:
+            encoder_outputs = tf.transpose(encoder_outputs, [1, 0, 2])
 
-        (bt_logits, bt_decoder_cell_outputs, 
-         bt_sample_id, bt_final_context_state) = (self._build_decoder(hparams,
-           encoder_outputs, encoder_state, sampled_seq_length, style_labels))
+          # Decode input sequence
+          (bt_logits, bt_decoder_cell_outputs, 
+           bt_sample_id, bt_final_context_state) = (self._build_decoder(hparams,
+             encoder_outputs, encoder_state, sampled_seq_length, style_labels))
+
+        # Discriminator
+        with tf.variable_scope("feature_extractor", dtype=self.dtype,
+            reuse=tf.AUTO_REUSE):
+          self._build_feature_extractor(hparams)
+          real_sent_reps = self._extract_sent_feats(tf.nn.embedding_lookup(
+                                                     self.embedding, sequence))
+          fake_sent_reps = self._extract_sent_feats(soft_sampled_seq)
+
+          self.rsr = real_sent_reps
+          self.fsr = fake_sent_reps
+
+          # Loss: IPOT(real_sent_reps, fake_sent_reps)
+
 
       # Inference
       else:
-        encoder_outputs, encoder_state = self._build_encoder(hparams,
-            sequence, sequence_length)
+        with tf.variable_scope("generator", dtype=self.dtype,
+            reuse=tf.AUTO_REUSE):
+          encoder_outputs, encoder_state = self._build_encoder(hparams,
+              sequence, sequence_length)
 
-        (logits, decoder_cell_outputs, 
-          sample_id, final_context_state) = self._build_decoder(hparams,
-              encoder_outputs, encoder_state, sequence_length,
-              self.target_style_labels, back_trans=False)
+          (logits, decoder_cell_outputs, 
+            sample_id, final_context_state) = self._build_decoder(hparams,
+                encoder_outputs, encoder_state, sequence_length,
+                self.target_style_labels, back_trans=False)
 
 
       ## Loss
@@ -656,6 +706,23 @@ class BaseModel(object):
 
     return sampled_style_labels
 
+  def _lookup_embedding(self, sequence, style_labels):
+    ### NOTE: this function assumes sequence is fed in batch_major order
+    one_hot_rep = tf.reduce_sum(tf.one_hot(style_labels,
+                                                self.num_styles), axis=1)
+
+    seq_emb = tf.nn.embedding_lookup(self.embedding_tensor, sequence)
+    seq_emb = tf.transpose(seq_emb, [0, 2, 1, 3])
+    seq_emb = tf.boolean_mask(seq_emb, one_hot_rep)
+    seq_emb = tf.reshape(seq_emb, [tf.shape(style_labels)[0],
+                                   tf.shape(style_labels)[1],
+                                   -1, self.num_units])
+    seq_emb = tf.reduce_mean(seq_emb, axis=1)
+
+    ## NOTE: If only one style we do this
+    #seq_emb = tf.nn.embedding_lookup(self.embedding, sequence)
+
+    return seq_emb
 
   def _build_encoder_cell(self, hparams, num_layers, num_residual_layers,
                           base_gpu=0):
@@ -809,7 +876,6 @@ class BaseModel(object):
         end_token = tgt_eos_id
 
         self.style_emb_inp = style_emb_inp
-        self.start_embeds = tf.nn.embedding_lookup(self.embedding, start_tokens)
 
         utils.print_out(
             "  decoder: infer_mode=%sbeam_width=%d, length_penalty=%f" % (
@@ -870,6 +936,31 @@ class BaseModel(object):
           sample_id = outputs.sample_id
 
     return logits, decoder_cell_outputs, sample_id, final_context_state
+
+  def _build_feature_extractor(self, hparams):
+    num_filters = 128
+    window_sizes = [2, 3, 5, 7]
+    self.conv_layers = []
+
+    for window_size in window_sizes:
+      self.conv_layers.append(tf.keras.layers.Conv2D(num_filters,
+                                                [window_size, self.num_units],
+                                                data_format="channels_last",
+                                                activation="tanh",
+                                                name=str(window_size)))
+    return
+
+  def _extract_sent_feats(self, embed_input):
+    embed_input = tf.expand_dims(embed_input, axis=3)
+
+    conv_outputs = []
+    for conv_layer in self.conv_layers:
+      x = conv_layer.apply(embed_input)
+      x = tf.reduce_max(x, axis=1)
+      x = tf.squeeze(x)
+      conv_outputs.append(x)
+
+    return tf.concat(conv_outputs, axis=1)
 
   def get_max_time(self, tensor):
     time_axis = 0 if self.time_major else 1

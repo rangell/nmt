@@ -520,12 +520,19 @@ def train(hparams, scope=None, target_session=""):
   summary_writer = tf.summary.FileWriter(
       os.path.join(out_dir, summary_name), train_model.graph)
 
-  #train_sess.run(
-  #    train_model.iterator.initializer,
-  #    feed_dict={train_model.skip_count_placeholder: 0})
+  train_sess.run(
+      train_model.iterator.initializer,
+      feed_dict={train_model.skip_count_placeholder: 0})
+  
+  sequence, inp_emb = \
+      train_sess.run([train_model.iterator.source,
+                      train_model.model.inp_emb])
 
-  #print(train_sess.run(train_model.iterator.target_output).shape)
-  #exit()
+  print("sequence:\n", sequence.shape)
+  print("inp_emb:\n", inp_emb.shape)
+  print("Check change2...")
+  print("Got here!")
+  exit()
 
   # First evaluation
   run_full_eval(

@@ -325,7 +325,8 @@ def create_emb_for_encoder_and_decoder(vocab_size,
                                        vocab_file=None,
                                        embed_file=None,
                                        use_char_encode=False,
-                                       scope=None):
+                                       scope=None,
+                                       name=None):
   """Create embedding matrix for both encoder and decoder.
 
   Args:
@@ -364,12 +365,14 @@ def create_emb_for_encoder_and_decoder(vocab_size,
     # jobs.
     dec_partitioner = tf.fixed_size_partitioner(num_dec_partitions)
 
+  embedding_name = name if name else "embedding"
+
   with tf.variable_scope(
       scope or "embeddings", dtype=dtype, partitioner=enc_partitioner) as scope:
-    # Share embedding
-    utils.print_out("# Use the same embedding for both styles")
+    ## Share embedding
+    #utils.print_out("# Use the same embedding for both styles")
     embedding = _create_or_load_embed(
-        "embedding", vocab_file, embed_file,
+        embedding_name, vocab_file, embed_file,
         vocab_size, embed_size, dtype)
 
   return embedding
