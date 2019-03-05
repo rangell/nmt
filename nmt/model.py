@@ -173,6 +173,7 @@ class BaseModel(object):
 
     # Embeddings
     if extra_args and extra_args.encoder_emb_lookup_fn:
+      assert False
       self.encoder_emb_lookup_fn = extra_args.encoder_emb_lookup_fn
     else:
       self.encoder_emb_lookup_fn = tf.nn.embedding_lookup
@@ -324,6 +325,13 @@ class BaseModel(object):
         name="learning_rate_decay_cond")
 
   def init_embeddings(self, hparams, scope):
+
+    # NOTES: 
+    #   - Check all time_major bullshit
+    #   - Check other files
+    #   - Add command line arg for style specific word embeddings
+    #   - Check embeddings function call
+
     """Init embeddings."""
     # Old embedding -- just to keep the peace for now
     self.embedding = model_helper.create_emb_for_encoder_and_decoder(
@@ -470,7 +478,7 @@ class BaseModel(object):
 
           # Encode input sequence
           encoder_outputs, encoder_state = self._build_encoder(hparams,
-              noisy_sequence, sequence_length)
+              noisy_sequence, sequence_length, style_labels)
 
           # Apply temporal max-pooling
           if self.time_major:
@@ -489,7 +497,7 @@ class BaseModel(object):
 
           ## Back-translate
           encoder_outputs, encoder_state = self._build_encoder(hparams,
-              sequence, sequence_length)
+              sequence, sequence_length, style_labels)
 
           # Apply temporal max-pooling
           if self.time_major:
@@ -507,16 +515,12 @@ class BaseModel(object):
               encoder_state, sequence_length, self.target_style_labels,
               back_trans=True)
 
-          # Soft sampled seq for feature extractor
-          _dim0, _dim1, _dim2 = (tf.shape(sample_logits)[0],
-                                 tf.shape(sample_logits)[1],
-                                 tf.shape(sample_logits)[2])
-          soft_sampled_seq = tf.nn.softmax(sample_logits, axis=2)
-          soft_sampled_seq = tf.reshape(soft_sampled_seq, [-1, _dim2])
-          soft_sampled_seq = tf.matmul(soft_sampled_seq, self.embedding)
-          soft_sampled_seq = tf.reshape(soft_sampled_seq, [_dim0, _dim1, -1])
           if self.time_major:
-            soft_sampled_seq = tf.transpose(soft_sampled_seq, [1, 0, 2])
+            sample_logits = tf.transpose(sample_logits, [1, 0, 2])
+
+          # Soft sampled seq for feature extractor
+          soft_sampled_seq = self._lookup_soft_embedding(sample_logits,
+                                                     self.target_style_labels)
 
           # Hard sampled seq for back-translation
           sampled_pseudo_sequence = sample_id
@@ -536,7 +540,8 @@ class BaseModel(object):
           self.sampled_pseudo_sequence = sampled_pseudo_sequence
 
           encoder_outputs, encoder_state = self._build_encoder(hparams,
-              sampled_pseudo_sequence, sampled_seq_length)
+              sampled_pseudo_sequence, sampled_seq_length,
+              self.target_style_labels)
 
           # Apply temporal max-pooling
           if self.time_major:
@@ -557,8 +562,12 @@ class BaseModel(object):
         with tf.variable_scope("feature_extractor", dtype=self.dtype,
             reuse=tf.AUTO_REUSE):
           self._build_feature_extractor(hparams)
-          real_sent_reps = self._extract_sent_feats(tf.nn.embedding_lookup(
-                                                     self.embedding, sequence))
+          # @@@
+          #real_sent_reps = self._extract_sent_feats(tf.nn.embedding_lookup(
+          #                                           self.embedding, sequence))
+          real_sent_emb = self._lookup_embedding(sequence, style_labels)
+          real_sent_reps = self._extract_sent_feats(real_sent_emb)
+
           fake_sent_reps = self._extract_sent_feats(soft_sampled_seq)
 
           self.rsr = real_sent_reps
@@ -572,7 +581,7 @@ class BaseModel(object):
         with tf.variable_scope("generator", dtype=self.dtype,
             reuse=tf.AUTO_REUSE):
           encoder_outputs, encoder_state = self._build_encoder(hparams,
-              sequence, sequence_length)
+              sequence, sequence_length, style_labels)
 
           (logits, decoder_cell_outputs, 
             sample_id, final_context_state) = self._build_decoder(hparams,
@@ -628,7 +637,7 @@ class BaseModel(object):
     return logits, loss, final_context_state, sample_id
 
   @abc.abstractmethod
-  def _build_encoder(self, hparams, sequence, sequence_length):
+  def _build_encoder(self, hparams, sequence, sequence_length, style_labels):
     """Subclass must implement this.
 
     Build and run an RNN encoder.
@@ -708,6 +717,7 @@ class BaseModel(object):
 
   def _lookup_embedding(self, sequence, style_labels):
     ### NOTE: this function assumes sequence is fed in batch_major order
+
     one_hot_rep = tf.reduce_sum(tf.one_hot(style_labels,
                                                 self.num_styles), axis=1)
 
@@ -723,6 +733,38 @@ class BaseModel(object):
     #seq_emb = tf.nn.embedding_lookup(self.embedding, sequence)
 
     return seq_emb
+
+  def _lookup_dynamic_decode_embedding(self, sequence, style_labels):
+    one_hot_rep = tf.reduce_sum(tf.one_hot(style_labels,
+                                                self.num_styles), axis=1)
+
+    seq_emb = tf.nn.embedding_lookup(self.embedding_tensor, sequence)
+    seq_emb = tf.boolean_mask(seq_emb, one_hot_rep)
+    seq_emb = tf.reshape(seq_emb, [tf.shape(style_labels)[0],
+                                   tf.shape(style_labels)[1],
+                                   self.num_units])
+    seq_emb = tf.reduce_mean(seq_emb, axis=1)
+
+    return seq_emb
+
+  def _lookup_soft_embedding(self, logits, style_labels):
+    ### NOTE: this function assumes sequence is fed in batch_major order
+    one_hot_rep = tf.reduce_sum(tf.one_hot(style_labels,
+                                           self.num_styles), axis=1)
+
+    soft_emb = tf.tensordot(logits, self.embedding_tensor, axes=[[2], [0]])
+
+    soft_emb = tf.transpose(soft_emb, [0, 2, 1, 3])
+    soft_emb = tf.boolean_mask(soft_emb, one_hot_rep)
+    soft_emb = tf.reshape(soft_emb, [tf.shape(style_labels)[0],
+                                     tf.shape(style_labels)[1],
+                                     -1, self.num_units])
+    soft_emb = tf.reduce_mean(soft_emb, axis=1)
+
+    ## NOTE: If only one style we do this
+    ## << What do I do in this case? >> 
+
+    return soft_emb
 
   def _build_encoder_cell(self, hparams, num_layers, num_residual_layers,
                           base_gpu=0):
@@ -801,8 +843,10 @@ class BaseModel(object):
           target_input = tf.transpose(target_input)
           time_axis = 0
 
-        decoder_emb_inp = tf.nn.embedding_lookup(
-            self.embedding, target_input)
+        # @@@
+        #decoder_emb_inp = tf.nn.embedding_lookup(
+        #    self.embedding, target_input)
+        decoder_emb_inp = self._lookup_embedding(target_input, style_labels)
 
         # Pass style embedding as <SOS> to decoder
         style_emb_inp = tf.reduce_mean(tf.nn.embedding_lookup(
@@ -881,6 +925,8 @@ class BaseModel(object):
             "  decoder: infer_mode=%sbeam_width=%d, length_penalty=%f" % (
                 infer_mode, hparams.beam_width, hparams.length_penalty_weight))
 
+        embedding_fn = lambda ids: self._lookup_dynamic_decode_embedding(ids, style_labels)
+
         if infer_mode == "beam_search":
           beam_width = hparams.beam_width
           length_penalty_weight = hparams.length_penalty_weight
@@ -904,12 +950,12 @@ class BaseModel(object):
           sampling_temperature = tf.cast(sampling_temperature, tf.float32)
 
           helper = inference_helpers.SampleInferenceHelper(
-              self.embedding, style_emb_inp, end_token,
+              embedding_fn, style_emb_inp, end_token,
               softmax_temperature=sampling_temperature,
               seed=self.random_seed)
         elif infer_mode == "greedy":
           helper = inference_helpers.GreedyInferenceHelper(
-              self.embedding, style_emb_inp, end_token)
+              embedding_fn, style_emb_inp, end_token)
         else:
           raise ValueError("Unknown infer_mode '%s'", infer_mode)
 
@@ -1094,7 +1140,7 @@ class Model(BaseModel):
   This class implements a multi-layer recurrent neural network as encoder,
   and a multi-layer recurrent neural network decoder.
   """
-  def _build_encoder(self, hparams, sequence, sequence_length):
+  def _build_encoder(self, hparams, sequence, sequence_length, style_labels):
     """Build an encoder from a sequence.
 
     Args:
@@ -1115,15 +1161,14 @@ class Model(BaseModel):
     num_layers = self.num_encoder_layers
     num_residual_layers = self.num_encoder_residual_layers
 
-    if self.time_major:
-      sequence = tf.transpose(sequence)
-
     with tf.variable_scope("encoder") as scope:
       dtype = scope.dtype
       
       # Look up embeddings for each token in sequence
-      self.encoder_emb_inp = self.encoder_emb_lookup_fn(
-          self.embedding, sequence)
+      self.encoder_emb_inp = self._lookup_embedding(sequence, style_labels)
+
+      if self.time_major:
+        sequence = tf.transpose(sequence)
 
       # Encoder_outputs: [max_time, batch_size, num_units]
       if hparams.encoder_type == "uni":
