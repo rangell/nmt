@@ -524,13 +524,12 @@ def train(hparams, scope=None, target_session=""):
       train_model.iterator.initializer,
       feed_dict={train_model.skip_count_placeholder: 0})
   
-  sequence, inp_emb = \
-      train_sess.run([train_model.iterator.source,
-                      train_model.model.inp_emb])
+  #rsr, fsr = train_sess.run([train_model.model.rsr, train_model.model.fsr])
+  source = train_sess.run(train_model.iterator.source)
 
-  print("sequence:\n", sequence.shape)
-  print("inp_emb:\n", inp_emb.shape)
-  print("Check change2...")
+  #print("rsr:\n", rsr.shape)
+  #print("fsr:\n", fsr.shape)
+  print("source:\n", source.shape)
   print("Got here!")
   exit()
 

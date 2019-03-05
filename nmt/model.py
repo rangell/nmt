@@ -327,10 +327,7 @@ class BaseModel(object):
   def init_embeddings(self, hparams, scope):
 
     # NOTES: 
-    #   - Check all time_major bullshit
-    #   - Check other files
     #   - Add command line arg for style specific word embeddings
-    #   - Check embeddings function call
 
     """Init embeddings."""
     # Old embedding -- just to keep the peace for now
@@ -562,9 +559,6 @@ class BaseModel(object):
         with tf.variable_scope("feature_extractor", dtype=self.dtype,
             reuse=tf.AUTO_REUSE):
           self._build_feature_extractor(hparams)
-          # @@@
-          #real_sent_reps = self._extract_sent_feats(tf.nn.embedding_lookup(
-          #                                           self.embedding, sequence))
           real_sent_emb = self._lookup_embedding(sequence, style_labels)
           real_sent_reps = self._extract_sent_feats(real_sent_emb)
 
@@ -843,9 +837,6 @@ class BaseModel(object):
           target_input = tf.transpose(target_input)
           time_axis = 0
 
-        # @@@
-        #decoder_emb_inp = tf.nn.embedding_lookup(
-        #    self.embedding, target_input)
         decoder_emb_inp = self._lookup_embedding(target_input, style_labels)
 
         # Pass style embedding as <SOS> to decoder
