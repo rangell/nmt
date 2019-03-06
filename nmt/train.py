@@ -524,12 +524,15 @@ def train(hparams, scope=None, target_session=""):
       train_model.iterator.initializer,
       feed_dict={train_model.skip_count_placeholder: 0})
   
-  #rsr, fsr = train_sess.run([train_model.model.rsr, train_model.model.fsr])
-  source = train_sess.run(train_model.iterator.source)
+  rsr, fsr, IPOT_dist, tmp = train_sess.run([train_model.model.rsr,
+                                             train_model.model.fsr,
+                                             train_model.model.IPOT_dist,
+                                             train_model.model.tmp])
 
-  #print("rsr:\n", rsr.shape)
-  #print("fsr:\n", fsr.shape)
-  print("source:\n", source.shape)
+  print("rsr:\n", rsr.shape)
+  print("fsr:\n", fsr.shape)
+  print("IPOT_dist:\n", IPOT_dist)
+  print("tmp:\n", tmp)
   print("Got here!")
   exit()
 

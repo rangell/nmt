@@ -567,6 +567,9 @@ class BaseModel(object):
           self.rsr = real_sent_reps
           self.fsr = fake_sent_reps
 
+          #self.cos_dist_mx = self._cosine_distance_matrix(self.rsr, self.fsr)
+          self.IPOT_dist = self._IPOT_loss(self.rsr, self.fsr)
+
           # Loss: IPOT(real_sent_reps, fake_sent_reps)
 
 
@@ -1053,6 +1056,35 @@ class BaseModel(object):
 
     return crossent
 
+  def _cosine_distance_matrix(self, feature_set_1, feature_set_2):
+    feature_set_1 = tf.math.l2_normalize(feature_set_1, axis=1)
+    feature_set_2 = tf.math.l2_normalize(feature_set_2, axis=1)
+
+    cosine_similarity = tf.matmul(feature_set_1, feature_set_2,
+                                  transpose_b=True)
+    return (1 - cosine_similarity)
+
+  def _IPOT_loss(self, feature_set_1, feature_set_2, beta=1):
+    n1, n2 = tf.shape(feature_set_1)[0], tf.shape(feature_set_2)[0]
+    sigma = tf.scalar_mul(tf.cast(tf.divide(1, n2), tf.float32),
+                          tf.ones([n2, 1]))
+    T = tf.ones([n1, n2])
+    C = self._cosine_distance_matrix(feature_set_1, feature_set_2)
+    A = tf.exp(-C / beta)
+
+    self.tmp = tf.trace(tf.matmul(C, T, transpose_a=True))
+
+    for _ in range(50):
+      Q = tf.multiply(A, T)
+      delta = tf.divide(1, tf.scalar_mul(tf.cast(n1, tf.float32),
+                                         tf.matmul(Q, sigma)))
+      sigma = tf.divide(1, tf.scalar_mul(tf.cast(n2, tf.float32),
+                                         tf.matmul(tf.transpose(Q), delta)))
+      T = tf.matmul(tf.matmul(tf.diag(tf.squeeze(delta)), Q),
+                    tf.diag(tf.squeeze(sigma)))
+
+    return tf.trace(tf.matmul(C, T, transpose_a=True))
+
   def _compute_loss(self, logits, decoder_cell_outputs):
     """Compute optimization loss."""
     target_output = self.iterator.target_output
@@ -1159,7 +1191,7 @@ class Model(BaseModel):
       self.encoder_emb_inp = self._lookup_embedding(sequence, style_labels)
 
       if self.time_major:
-        sequence = tf.transpose(sequence)
+        self.encoder_emb_inp = tf.transpose(self.encoder_emb_inp, [1, 0, 2])
 
       # Encoder_outputs: [max_time, batch_size, num_units]
       if hparams.encoder_type == "uni":
