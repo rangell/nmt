@@ -23,6 +23,8 @@ import collections
 from functools import reduce
 import numpy as np
 from operator import mul
+import random
+import sys
 
 from IPython import embed
 import tensorflow as tf
@@ -40,9 +42,10 @@ __all__ = ["BaseModel", "Model"]
 
 
 class TrainOutputTuple(collections.namedtuple(
-    "TrainOutputTuple", ("train_summary", "train_loss", "predict_count",
-                         "global_step", "word_count", "batch_size", "grad_norm",
-                         "learning_rate"))):
+    "TrainOutputTuple", ("train_summary", "train_loss_F", "train_loss_G",
+                         "train_ae_loss", "train_bt_loss", "predict_count", "global_step",
+                         "word_count", "batch_size", "grad_norm_F",
+                         "grad_norm_G", "learning_rate"))):
   """To allow for flexibily in returing different outputs."""
   pass
 
@@ -67,7 +70,8 @@ class BaseModel(object):
   def __init__(self,
                hparams,
                mode,
-               iterator,
+               iterator_G,
+               iterator_F,
                vocab_table,
                reverse_vocab_table=None,
                scope=None,
@@ -87,8 +91,8 @@ class BaseModel(object):
 
     """
     # Set params
-    self._set_params_initializer(hparams, mode, iterator, vocab_table, 
-                                 scope, extra_args)
+    self._set_params_initializer(hparams, mode, iterator_G, iterator_F,
+                                 vocab_table, scope, extra_args)
 
     # Not used in general seq2seq models; when True, ignore decoder & training
     self.extract_encoder_layers = (hasattr(hparams, "extract_encoder_layers")
@@ -106,13 +110,16 @@ class BaseModel(object):
   def _set_params_initializer(self,
                               hparams,
                               mode,
-                              iterator,
+                              iterator_G,
+                              iterator_F,
                               vocab_table,
                               scope,
                               extra_args=None):
     """Set various params for self and initialize."""
-    assert isinstance(iterator, iterator_utils.StyleBatchedInput)
-    self.iterator = iterator
+    assert isinstance(iterator_G, iterator_utils.StyleBatchedInput)
+    self.iterator = iterator_G
+    self.iterator_G = iterator_G
+    self.iterator_F = iterator_F
     self.mode = mode
     self.vocab_table = vocab_table
 
@@ -164,6 +171,7 @@ class BaseModel(object):
     # Loss weighting
     self.lambda_ae = tf.Variable(hparams.lambda_ae, trainable=False)
     self.lambda_bt = tf.Variable(hparams.lambda_bt, trainable=False)
+    self.lambda_ot = tf.Variable(hparams.lambda_ot, trainable=False)
 
     # Initializer
     self.random_seed = hparams.random_seed
@@ -194,14 +202,18 @@ class BaseModel(object):
   def _set_train_or_infer(self, res, reverse_vocab_table, hparams):
     """Set up training and inference."""
     if self.mode == tf.contrib.learn.ModeKeys.TRAIN:
-      self.train_loss = res[1]
+      self.train_loss_F = res[1]
+      self.train_loss_G = res[2]
+      self.train_ae_loss = res[3]
+      self.train_bt_loss = res[4]
       self.word_count = tf.reduce_sum(
           self.iterator.source_sequence_length) + tf.reduce_sum(
               self.iterator.target_sequence_length)
     elif self.mode == tf.contrib.learn.ModeKeys.EVAL:
-      self.eval_loss = res[1]
+      self.eval_loss = res[2]
     elif self.mode == tf.contrib.learn.ModeKeys.INFER:
-      self.infer_logits, _, self.final_context_state, self.sample_id = res
+      (self.infer_logits, _, _, _, _,
+       self.final_context_state, self.sample_id) = res
       self.sample_words = reverse_vocab_table.lookup(
           tf.to_int64(self.sample_id))
 
@@ -210,7 +222,9 @@ class BaseModel(object):
       self.predict_count = tf.reduce_sum(
           self.iterator.target_sequence_length)
 
-    params = tf.trainable_variables()
+    params_F = tf.trainable_variables(
+        scope='dynamic_seq2seq/feature_extractor')
+    params_G = [p for p in tf.trainable_variables() if p not in params_F]
 
     # Gradients and SGD update operation for training the model.
     # Arrange for the embedding vars to appear at the beginning.
@@ -226,25 +240,44 @@ class BaseModel(object):
 
       # Optimizer
       if hparams.optimizer == "sgd":
-        opt = tf.train.GradientDescentOptimizer(self.learning_rate)
+        opt_G = tf.train.GradientDescentOptimizer(self.learning_rate)
+        opt_F = tf.train.GradientDescentOptimizer(self.learning_rate)
       elif hparams.optimizer == "adam":
-        opt = tf.train.AdamOptimizer(self.learning_rate, beta1=self.beta1)
+        opt_G = tf.train.AdamOptimizer(self.learning_rate, beta1=self.beta1)
+        opt_F = tf.train.AdamOptimizer(self.learning_rate, beta1=self.beta1)
       else:
         raise ValueError("Unknown optimizer type %s" % hparams.optimizer)
 
-      # Gradients
-      gradients = tf.gradients(
-          self.train_loss,
-          params,
+      ## Gradients
+      # feature_extractor
+      gradients_F = tf.gradients(
+          self.train_loss_F,
+          params_F,
           colocate_gradients_with_ops=hparams.colocate_gradients_with_ops)
 
-      clipped_grads, grad_norm_summary, grad_norm = model_helper.gradient_clip(
-          gradients, max_gradient_norm=hparams.max_gradient_norm)
-      self.grad_norm_summary = grad_norm_summary
-      self.grad_norm = grad_norm
+      clipped_grads_F, grad_norm_summary_F, grad_norm_F = \
+          model_helper.gradient_clip(
+              gradients_F, max_gradient_norm=hparams.max_gradient_norm)
+      self.grad_norm_summary_F = grad_norm_summary_F
+      self.grad_norm_F = grad_norm_F
 
-      self.update = opt.apply_gradients(
-          zip(clipped_grads, params), global_step=self.global_step)
+      self.update_F = opt_F.apply_gradients(
+          zip(clipped_grads_F, params_F), global_step=self.global_step)
+
+      # generator
+      gradients_G = tf.gradients(
+          self.train_loss_G,
+          params_G,
+          colocate_gradients_with_ops=hparams.colocate_gradients_with_ops)
+
+      clipped_grads_G, grad_norm_summary_G, grad_norm_G = \
+          model_helper.gradient_clip(
+              gradients_G, max_gradient_norm=hparams.max_gradient_norm)
+      self.grad_norm_summary_G = grad_norm_summary_G
+      self.grad_norm_G = grad_norm_G
+
+      self.update_G = opt_G.apply_gradients(
+          zip(clipped_grads_G, params_G), global_step=self.global_step)
 
       # Summary
       self.train_summary = self._get_train_summary()
@@ -252,9 +285,15 @@ class BaseModel(object):
       self.infer_summary = self._get_infer_summary(hparams)
 
     # Print trainable variables
-    utils.print_out("# Trainable variables")
+    utils.print_out("# Trainable variables (Generator)")
     utils.print_out("Format: <name>, <shape>, <(soft) device placement>")
-    for param in params:
+    for param in params_G:
+      utils.print_out("  %s, %s, %s" % (param.name, str(param.get_shape()),
+                                        param.op.device))
+
+    utils.print_out("# Trainable variables (Feature Extractor)")
+    utils.print_out("Format: <name>, <shape>, <(soft) device placement>")
+    for param in params_F:
       utils.print_out("  %s, %s, %s" % (param.name, str(param.get_shape()),
                                         param.op.device))
 
@@ -324,23 +363,33 @@ class BaseModel(object):
             decay_steps, decay_factor, staircase=True),
         name="learning_rate_decay_cond")
 
+  def init_train_iterators(self, sess, seed_placeholder,
+                           skip_count_placeholder):
+    assert self.mode == tf.contrib.learn.ModeKeys.TRAIN
+
+    feed_dict = {seed_placeholder: random.randint(0, sys.maxsize),
+                 skip_count_placeholder: 0}
+
+    sess.run(self.iterator_G.initializer, feed_dict=feed_dict)
+    sess.run(self.iterator_F.initializer, feed_dict=feed_dict)
+
   def init_embeddings(self, hparams, scope):
 
     # NOTES: 
     #   - Add command line arg for style specific word embeddings
 
     """Init embeddings."""
-    # Old embedding -- just to keep the peace for now
-    self.embedding = model_helper.create_emb_for_encoder_and_decoder(
-      vocab_size=self.vocab_size,
-      embed_size=self.num_units,
-      num_enc_partitions=hparams.num_enc_emb_partitions,
-      num_dec_partitions=hparams.num_dec_emb_partitions,
-      vocab_file=hparams.vocab_file,
-      embed_file=hparams.embed_file,
-      use_char_encode=hparams.use_char_encode,
-      scope=scope,
-      name="embedding")
+    ## Old embedding -- just to keep the peace for now
+    #self.embedding = model_helper.create_emb_for_encoder_and_decoder(
+    #  vocab_size=self.vocab_size,
+    #  embed_size=self.num_units,
+    #  num_enc_partitions=hparams.num_enc_emb_partitions,
+    #  num_dec_partitions=hparams.num_dec_emb_partitions,
+    #  vocab_file=hparams.vocab_file,
+    #  embed_file=hparams.embed_file,
+    #  use_char_encode=hparams.use_char_encode,
+    #  scope=scope,
+    #  name="embedding")
 
     # New style specific embeddings
     style_specific_embeddings = []
@@ -383,22 +432,34 @@ class BaseModel(object):
     """Get train summary."""
     train_summary = tf.summary.merge(
         [tf.summary.scalar("lr", self.learning_rate),
-         tf.summary.scalar("train_loss", self.train_loss)] +
-        self.grad_norm_summary)
+         tf.summary.scalar("train_loss_F", self.train_loss_F),
+         tf.summary.scalar("train_loss_G", self.train_loss_G)] +
+        self.grad_norm_summary_F, self.grad_norm_summary_G)
     return train_summary
 
   def train(self, sess):
     """Execute train graph."""
     assert self.mode == tf.contrib.learn.ModeKeys.TRAIN
+
+    # Optimize feature extractor
+    self.iterator = self.iterator_F
+    sess.run(self.update_F)
+
+    # Optimize generator
+    self.iterator = self.iterator_G
     output_tuple = TrainOutputTuple(train_summary=self.train_summary,
-                                    train_loss=self.train_loss,
+                                    train_loss_F=self.train_loss_F,
+                                    train_loss_G=self.train_loss_G,
+                                    train_ae_loss=self.train_ae_loss,
+                                    train_bt_loss=self.train_bt_loss,
                                     predict_count=self.predict_count,
                                     global_step=self.global_step,
                                     word_count=self.word_count,
                                     batch_size=self.batch_size,
-                                    grad_norm=self.grad_norm,
+                                    grad_norm_F=self.grad_norm_F,
+                                    grad_norm_G=self.grad_norm_G,
                                     learning_rate=self.learning_rate)
-    return sess.run([self.update, output_tuple])
+    return sess.run([self.update_G, output_tuple])
 
   def eval(self, sess):
     """Execute eval graph."""
@@ -434,7 +495,7 @@ class BaseModel(object):
     # Projection
     if not self.extract_encoder_layers:
       with tf.variable_scope(scope or "build_network"):
-        with tf.variable_scope("decoder/output_projection"):
+        with tf.variable_scope("generator/decoder/output_projection"):
           self.output_layer = tf.layers.Dense(
               self.vocab_size, use_bias=False, name="output_projection")
 
@@ -558,7 +619,15 @@ class BaseModel(object):
         # Discriminator
         with tf.variable_scope("feature_extractor", dtype=self.dtype,
             reuse=tf.AUTO_REUSE):
-          self._build_feature_extractor(hparams)
+
+          if self.num_gpus == 0:
+            feature_extractor_device = "/cpu:0"
+          else:
+            feature_extractor_device = "/gpu:" + str(self.num_gpus - 1)
+
+          with tf.device(feature_extractor_device):
+            self._build_feature_extractor(hparams)
+
           real_sent_emb = self._lookup_embedding(sequence, style_labels)
           real_sent_reps = self._extract_sent_feats(real_sent_emb)
 
@@ -567,11 +636,7 @@ class BaseModel(object):
           self.rsr = real_sent_reps
           self.fsr = fake_sent_reps
 
-          #self.cos_dist_mx = self._cosine_distance_matrix(self.rsr, self.fsr)
           self.IPOT_dist = self._IPOT_loss(self.rsr, self.fsr)
-
-          # Loss: IPOT(real_sent_reps, fake_sent_reps)
-
 
       # Inference
       else:
@@ -585,13 +650,17 @@ class BaseModel(object):
                 encoder_outputs, encoder_state, sequence_length,
                 self.target_style_labels, back_trans=False)
 
-
       ## Loss
+      loss_F = tf.constant(0.0)
+      loss_G = tf.constant(0.0)
+      ae_loss = tf.constant(0.0)
+      bt_loss = tf.constant(0.0)
+
       if (hparams.language_model          
           and self.mode != tf.contrib.learn.ModeKeys.INFER):
         with tf.device(model_helper.get_device_str(self.num_encoder_layers - 1,
                                                    self.num_gpus)):
-          loss = self._compute_loss(logits, decoder_cell_outputs)
+          loss_G = self._compute_loss(logits, decoder_cell_outputs)
 
       elif self.mode != tf.contrib.learn.ModeKeys.INFER:
         logits = ae_logits
@@ -609,11 +678,12 @@ class BaseModel(object):
                                  * tf.cast(self.global_step, tf.float32))
                                 / hparams.num_train_steps))
 
-          loss = (lambda_ae * ae_loss) + (self.lambda_bt * bt_loss)
-      else:
-        loss = tf.constant(0.0)
+          loss_G = ((lambda_ae * ae_loss) + (self.lambda_bt * bt_loss)
+                    + (self.lambda_ot * self.IPOT_dist))
+          loss_F = -self.IPOT_dist
 
-      return logits, loss, final_context_state, sample_id
+      return (logits, loss_F, loss_G, ae_loss, bt_loss,
+              final_context_state, sample_id)
 
   def _build_language_model(self, hparams):
     ## TODO: make this work for style -- this is currently wrong
@@ -631,7 +701,7 @@ class BaseModel(object):
     else:
       loss = tf.constant(0.0)
 
-    return logits, loss, final_context_state, sample_id
+    return logits, loss_F, loss_G, final_context_state, sample_id
 
   @abc.abstractmethod
   def _build_encoder(self, hparams, sequence, sequence_length, style_labels):
@@ -835,12 +905,12 @@ class BaseModel(object):
         target_input = iterator.target_input
         time_axis = 1
 
+        decoder_emb_inp = self._lookup_embedding(target_input, style_labels)
+
         if self.time_major:
           # decoder_emp_inp: [max_time, batch_size, num_units]
-          target_input = tf.transpose(target_input)
+          decoder_emb_inp = tf.transpose(decoder_emb_inp, [1, 0, 2])
           time_axis = 0
-
-        decoder_emb_inp = self._lookup_embedding(target_input, style_labels)
 
         # Pass style embedding as <SOS> to decoder
         style_emb_inp = tf.reduce_mean(tf.nn.embedding_lookup(
@@ -1072,8 +1142,6 @@ class BaseModel(object):
     C = self._cosine_distance_matrix(feature_set_1, feature_set_2)
     A = tf.exp(-C / beta)
 
-    self.tmp = tf.trace(tf.matmul(C, T, transpose_a=True))
-
     for _ in range(50):
       Q = tf.multiply(A, T)
       delta = tf.divide(1, tf.scalar_mul(tf.cast(n1, tf.float32),
@@ -1082,6 +1150,9 @@ class BaseModel(object):
                                          tf.matmul(tf.transpose(Q), delta)))
       T = tf.matmul(tf.matmul(tf.diag(tf.squeeze(delta)), Q),
                     tf.diag(tf.squeeze(sigma)))
+
+    # Prevent unnecessary gradient flow through optimization of `T` matrix.
+    tf.stop_gradient(T)
 
     return tf.trace(tf.matmul(C, T, transpose_a=True))
 

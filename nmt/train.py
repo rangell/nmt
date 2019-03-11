@@ -51,7 +51,7 @@ def run_sample_decode(infer_model, infer_sess, model_dir, hparams,
         infer_model.model, model_dir, infer_sess, "infer")
 
   _sample_decode(loaded_infer_model, global_step, infer_sess, hparams,
-                 infer_model.iterator, sample_text_data, sample_attr_data,
+                 infer_model.iterator_G, sample_text_data, sample_attr_data,
                  infer_model.text_placeholder,
                  infer_model.attributes_placeholder,
                  infer_model.batch_size_placeholder, summary_writer)
@@ -104,7 +104,7 @@ def run_internal_eval(eval_model,
       eval_model.attributes_file_placeholder] =  dev_attr_file
 
   dev_ppl = _internal_eval(loaded_eval_model, global_step, eval_sess,
-                           eval_model.iterator, dev_eval_iterator_feed_dict,
+                           eval_model.iterator_G, dev_eval_iterator_feed_dict,
                            summary_writer, "dev")
   test_ppl = None
   if use_test_set and hparams.test_prefix:
@@ -115,7 +115,7 @@ def run_internal_eval(eval_model,
     test_eval_iterator_feed_dict[
         eval_model.attributes_file_placeholder] =  test_attr_file
     test_ppl = _internal_eval(loaded_eval_model, global_step, eval_sess,
-                              eval_model.iterator, test_eval_iterator_feed_dict,
+                              eval_model.iterator_G, test_eval_iterator_feed_dict,
                               summary_writer, "test")
   return dev_ppl, test_ppl, global_step
 
@@ -180,7 +180,7 @@ def run_external_eval(infer_model,
       global_step,
       infer_sess,
       hparams,
-      infer_model.iterator,
+      infer_model.iterator_G,
       dev_infer_iterator_feed_dict,
       dev_text_file,
       "dev",
@@ -206,7 +206,7 @@ def run_external_eval(infer_model,
         global_step,
         infer_sess,
         hparams,
-        infer_model.iterator,
+        infer_model.iterator_G,
         test_infer_iterator_feed_dict,
         test_text_file,
         "test",
@@ -363,11 +363,12 @@ def run_full_eval(model_dir,
 
 def init_stats():
   """Initialize statistics that we want to accumulate."""
-  return {"step_time": 0.0, "train_loss": 0.0,
+  return {"step_time": 0.0, "train_loss_F": 0.0, "train_loss_G": 0.0,
+          "train_ae_loss": 0.0, "train_bt_loss": 0.0,
           "predict_count": 0.0,  # word count on the target side
           "word_count": 0.0,  # word counts for both source and target
           "sequence_count": 0.0,  # number of training examples processed
-          "grad_norm": 0.0}
+          "grad_norm_F": 0.0, "grad_norm_G": 0.0}
 
 
 def update_stats(stats, start_time, step_result):
@@ -377,8 +378,12 @@ def update_stats(stats, start_time, step_result):
   # Update statistics
   batch_size = output_tuple.batch_size
   stats["step_time"] += time.time() - start_time
-  stats["train_loss"] += output_tuple.train_loss * batch_size
-  stats["grad_norm"] += output_tuple.grad_norm
+  stats["train_loss_F"] += output_tuple.train_loss_F * batch_size
+  stats["train_loss_G"] += output_tuple.train_loss_G * batch_size
+  stats["train_ae_loss"] += output_tuple.train_ae_loss * batch_size
+  stats["train_bt_loss"] += output_tuple.train_bt_loss * batch_size
+  stats["grad_norm_F"] += output_tuple.grad_norm_F
+  stats["grad_norm_G"] += output_tuple.grad_norm_G
   stats["predict_count"] += output_tuple.predict_count
   stats["word_count"] += output_tuple.word_count
   stats["sequence_count"] += batch_size
@@ -390,9 +395,10 @@ def update_stats(stats, start_time, step_result):
 def print_step_info(prefix, global_step, info, result_summary, log_f):
   """Print all info at the current global step."""
   utils.print_out(
-      "%sstep %d lr %g step-time %.2fs wps %.2fK ppl %.2f gN %.2f %s, %s" %
+      "%sstep %d lr %g step-time %.2fs wps %.2fK ae_ppl %.2f bt_ppl %.2f gN_F %.2f gN_G %.2f %s, %s" %
       (prefix, global_step, info["learning_rate"], info["avg_step_time"],
-       info["speed"], info["train_ppl"], info["avg_grad_norm"], result_summary,
+       info["speed"], info["train_ae_ppl"], info["train_bt_ppl"], 
+       info["avg_grad_norm_F"], info["avg_grad_norm_G"], result_summary,
        time.ctime()),
       log_f)
 
@@ -409,18 +415,24 @@ def process_stats(stats, info, global_step, steps_per_stats, log_f):
   """Update info and check for overflow."""
   # Per-step info
   info["avg_step_time"] = stats["step_time"] / steps_per_stats
-  info["avg_grad_norm"] = stats["grad_norm"] / steps_per_stats
+  info["avg_grad_norm_F"] = stats["grad_norm_F"] / steps_per_stats
+  info["avg_grad_norm_G"] = stats["grad_norm_G"] / steps_per_stats
   info["avg_sequence_count"] = stats["sequence_count"] / steps_per_stats
   info["speed"] = stats["word_count"] / (1000 * stats["step_time"])
 
   # Per-predict info
-  info["train_ppl"] = (
-      utils.safe_exp(stats["train_loss"] / stats["predict_count"]))
+  info["train_ae_ppl"] = (
+      utils.safe_exp(stats["train_ae_loss"] / stats["predict_count"]))
+  info["train_bt_ppl"] = (
+      utils.safe_exp(stats["train_bt_loss"] / stats["predict_count"]))
 
   # Check for overflow
   is_overflow = False
-  train_ppl = info["train_ppl"]
-  if math.isnan(train_ppl) or math.isinf(train_ppl) or train_ppl > 1e20:
+  train_ae_ppl = info["train_ae_ppl"]
+  train_bt_ppl = info["train_bt_ppl"]
+  if (math.isnan(train_ae_ppl) or math.isinf(train_ae_ppl) 
+      or train_bt_ppl > 1e20 or math.isnan(train_bt_ppl) 
+      or math.isinf(train_bt_ppl) or train_bt_ppl > 1e20):
     utils.print_out("  step %d overflow, stop early" % global_step,
                     log_f)
     is_overflow = True
@@ -432,9 +444,12 @@ def before_train(loaded_train_model, train_model, train_sess, global_step,
                  hparams, log_f):
   """Misc tasks to do before training."""
   stats = init_stats()
-  info = {"train_ppl": 0.0, "speed": 0.0,
+  info = {"train_ae_ppl": 0.0, 
+          "train_bt_ppl": 0.0,
+          "speed": 0.0,
           "avg_step_time": 0.0,
-          "avg_grad_norm": 0.0,
+          "avg_grad_norm_F": 0.0,
+          "avg_grad_norm_G": 0.0,
           "avg_sequence_count": 0.0,
           "learning_rate": loaded_train_model.learning_rate.eval(
               session=train_sess)}
@@ -445,9 +460,8 @@ def before_train(loaded_train_model, train_model, train_sess, global_step,
   # Initialize all of the iterators
   skip_count = hparams.batch_size * hparams.epoch_step
   utils.print_out("# Init train iterator, skipping %d elements" % skip_count)
-  train_sess.run(
-      train_model.iterator.initializer,
-      feed_dict={train_model.skip_count_placeholder: skip_count})
+  train_model.model.init_train_iterators(train_sess,
+      train_model.seed_placeholder, train_model.skip_count_placeholder)
 
   return stats, info, start_train_time
 
@@ -520,28 +534,16 @@ def train(hparams, scope=None, target_session=""):
   summary_writer = tf.summary.FileWriter(
       os.path.join(out_dir, summary_name), train_model.graph)
 
-  train_sess.run(
-      train_model.iterator.initializer,
-      feed_dict={train_model.skip_count_placeholder: 0})
-  
-  rsr, fsr, IPOT_dist, tmp = train_sess.run([train_model.model.rsr,
-                                             train_model.model.fsr,
-                                             train_model.model.IPOT_dist,
-                                             train_model.model.tmp])
-
-  print("rsr:\n", rsr.shape)
-  print("fsr:\n", fsr.shape)
-  print("IPOT_dist:\n", IPOT_dist)
-  print("tmp:\n", tmp)
-  print("Got here!")
-  exit()
-
   # First evaluation
   run_full_eval(
       model_dir, infer_model, infer_sess,
       eval_model, eval_sess, hparams,
       summary_writer, sample_text_data,
       sample_attr_data, avg_ckpts)
+
+  ## TODO:
+  #     - Get it to run all the way through
+  #     - Get it to work with style_specific embeddings flag
 
   last_stats_step = global_step
   last_eval_step = global_step
@@ -558,6 +560,10 @@ def train(hparams, scope=None, target_session=""):
       hparams.epoch_step += 1
     except tf.errors.OutOfRangeError:
       # Finished going through the training dataset.  Go to next epoch.
+
+      print("Ran one whole evaluation!!!!!")
+      exit()
+
       hparams.epoch_step = 0
       utils.print_out(
           "# Finished an epoch, step %d. Perform external evaluation" %
@@ -571,9 +577,8 @@ def train(hparams, scope=None, target_session=""):
         run_avg_external_eval(infer_model, infer_sess, model_dir, hparams,
                               summary_writer, global_step)
 
-      train_sess.run(
-          train_model.iterator.initializer,
-          feed_dict={train_model.skip_count_placeholder: 0})
+      train_model.model.init_train_iterators(train_sess,
+          train_model.seed_placeholder, train_model.skip_count_placeholder)
       continue
 
     # Process step_result, accumulate stats, and write summary

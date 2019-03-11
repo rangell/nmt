@@ -74,7 +74,8 @@ class ExtraArgs(collections.namedtuple(
 
 
 class TrainModel(
-    collections.namedtuple("TrainModel", ("graph", "model", "iterator",
+    collections.namedtuple("TrainModel", ("graph", "model", "iterator_G",
+                                          "iterator_F", "seed_placeholder",
                                           "skip_count_placeholder"))):
   pass
 
@@ -101,9 +102,10 @@ def create_train_model(
     attributes_dataset = tf.data.experimental.CsvDataset(attributes_file,
                                                          record_defaults)
 
+    seed_placeholder = tf.placeholder(shape=(), dtype=tf.int64)
     skip_count_placeholder = tf.placeholder(shape=(), dtype=tf.int64)
 
-    iterator = iterator_utils.get_style_iterator(
+    iterator_G = iterator_utils.get_style_iterator(
         hparams,
         text_dataset,
         attributes_dataset,
@@ -112,7 +114,24 @@ def create_train_model(
         batch_size=hparams.batch_size,
         sos=hparams.sos,
         eos=hparams.eos,
-        random_seed=hparams.random_seed,
+        random_seed=seed_placeholder,
+        num_buckets=hparams.num_buckets,
+        max_len=hparams.max_len,
+        skip_count=skip_count_placeholder,
+        num_shards=num_workers,
+        shard_index=jobid,
+        use_char_encode=hparams.use_char_encode)
+
+    iterator_F = iterator_utils.get_style_iterator(
+        hparams,
+        text_dataset,
+        attributes_dataset,
+        vocab_table,
+        style_table,
+        batch_size=hparams.batch_size,
+        sos=hparams.sos,
+        eos=hparams.eos,
+        random_seed=seed_placeholder,
         num_buckets=hparams.num_buckets,
         max_len=hparams.max_len,
         skip_count=skip_count_placeholder,
@@ -127,7 +146,8 @@ def create_train_model(
     with tf.device(model_device_fn):
       model = model_creator(
           hparams,
-          iterator=iterator,
+          iterator_G=iterator_G,
+          iterator_F=iterator_F,
           mode=tf.contrib.learn.ModeKeys.TRAIN,
           vocab_table=vocab_table,
           scope=scope,
@@ -136,14 +156,16 @@ def create_train_model(
   return TrainModel(
       graph=graph,
       model=model,
-      iterator=iterator,
+      iterator_G=iterator_G,
+      iterator_F=iterator_F,
+      seed_placeholder=seed_placeholder,
       skip_count_placeholder=skip_count_placeholder)
 
 
 class EvalModel(
     collections.namedtuple("EvalModel",
                            ("graph", "model", "text_file_placeholder",
-                            "attributes_file_placeholder", "iterator"))):
+                            "attributes_file_placeholder", "iterator_G"))):
   pass
 
 
@@ -172,7 +194,7 @@ def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
         attributes_file_placeholder,
         record_defaults)
 
-    iterator = iterator_utils.get_style_iterator(
+    iterator_G = iterator_utils.get_style_iterator(
         hparams,
         text_dataset,
         attributes_dataset,
@@ -188,7 +210,8 @@ def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
 
     model = model_creator(
         hparams,
-        iterator=iterator,
+        iterator_G=iterator_G,
+        iterator_F=None,
         mode=tf.contrib.learn.ModeKeys.EVAL,
         vocab_table=vocab_table,
         reverse_vocab_table=reverse_vocab_table,
@@ -200,14 +223,14 @@ def create_eval_model(model_creator, hparams, scope=None, extra_args=None):
       model=model,
       text_file_placeholder=text_file_placeholder,
       attributes_file_placeholder=attributes_file_placeholder,
-      iterator=iterator)
+      iterator_G=iterator_G)
 
 
 class InferModel(
     collections.namedtuple("InferModel",
                            ("graph", "model", "text_placeholder",
                             "attributes_placeholder", "batch_size_placeholder",
-                            "iterator"))):
+                            "iterator_G"))):
   pass
 
 
@@ -234,7 +257,7 @@ def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
     attributes_dataset = tf.data.Dataset.from_tensor_slices(
         attributes_placeholder)
     
-    iterator = iterator_utils.get_style_infer_iterator(
+    iterator_G = iterator_utils.get_style_infer_iterator(
         hparams,
         text_dataset,
         attributes_dataset,
@@ -248,7 +271,8 @@ def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
 
     model = model_creator(
         hparams,
-        iterator=iterator,
+        iterator_G=iterator_G,
+        iterator_F=None,
         mode=tf.contrib.learn.ModeKeys.INFER,
         vocab_table=vocab_table,
         reverse_vocab_table=reverse_vocab_table,
@@ -261,7 +285,7 @@ def create_infer_model(model_creator, hparams, scope=None, extra_args=None):
       text_placeholder=text_placeholder,
       attributes_placeholder=attributes_placeholder,
       batch_size_placeholder=batch_size_placeholder,
-      iterator=iterator)
+      iterator_G=iterator_G)
 
 
 def _get_embed_device(vocab_size):
@@ -376,34 +400,6 @@ def create_emb_for_encoder_and_decoder(vocab_size,
         vocab_size, embed_size, dtype)
 
   return embedding
-
-
-#def create_style_table_and_embedding(style_metadata,
-#                                     embed_size,
-#                                     dtype=tf.float32,
-#                                     scope=None):
-#  with tf.variable_scope(scope or "style_embeddings", dtype=dtype) as scope:
-#    ## Create table
-#    styles = [] # list of all the styles as strings
-#    for attribute_dict in style_metadata['attributes']:
-#      styles += attribute_dict[list(attribute_dict.keys())[0]]
-#
-#    mapping_strings = tf.constant(styles)
-#    style_table = tf.contrib.lookup.index_table_from_tensor(
-#        mapping=mapping_strings, num_oov_buckets=0, default_value=-1)
-#    
-#    ### To query table:
-#    #sample_attr = tf.constant(['positive', 'male', 'asian'])
-#    #ids = style_table.lookup(sample_attr)
-#
-#    ## Create embedding
-#    style_embedding = tf.get_variable("style_embeddings",
-#        [len(styles), embed_size])
-#
-#    ### To query style embeddings
-#    #embedded_style_ids = tf.nn.embedding_lookup(style_embedding, style_ids)
-#
-#  return style_table, style_embedding
 
 
 def _single_cell(unit_type, num_units, forget_bias, dropout, mode,

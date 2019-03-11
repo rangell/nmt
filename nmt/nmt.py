@@ -146,6 +146,8 @@ def add_arguments(parser):
                       help="Weight of autoencoder loss in total loss.")
   parser.add_argument("--lambda_bt", type=float, default=1.0,
                       help="Weight of back-translation loss in total loss.")
+  parser.add_argument("--lambda_ot", type=float, default=1.0,
+                      help="Weight of optimal transport loss in total loss.")
 
   # Initializer
   parser.add_argument("--init_op", type=str, default="uniform",
@@ -187,6 +189,10 @@ def add_arguments(parser):
                       Whether check special sos, eos, unk tokens exist in the
                       vocab files.\
                       """)
+  parser.add_argument("--style_specific_word_embeddings", type="bool",
+                      nargs="?", const=True, default=False,
+                      help=("Whether to use style specific word\
+                             embeddings or not"))
 
   # Sequence lengths
   parser.add_argument("--max_len", type=int, default=300,
@@ -369,6 +375,7 @@ def create_hparams(flags):
       num_sampled_softmax=flags.num_sampled_softmax,
       lambda_ae=flags.lambda_ae,
       lambda_bt=flags.lambda_bt,
+      lambda_ot=flags.lambda_ot,
 
       # Data constraints
       num_buckets=flags.num_buckets,
